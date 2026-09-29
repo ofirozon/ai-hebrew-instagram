@@ -1,0 +1,40 @@
+name: Publish due Instagram posts
+
+on:
+  schedule:
+    # Every 10 minutes. Hourly reads as "at worst an hour late" but is not:
+    # GitHub delays or drops schedule events under load, and on 20.9.2026 the
+    # stocklearneasy 12:00 post sat in the queue for two hours because no run
+    # fired between 11:09 and 14:08. This repo is public, so Actions minutes
+    # are unlimited and running this often costs nothing. The Mac also kicks
+    # the workflow after each slot (~/.local/bin/publish-kick-ai-he.sh).
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: pip install --quiet pillow
+
+      - name: Publish due posts
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.AI_IG_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.AI_IG_USER_ID }}
+        run: python3 publish.py
+
+      - name: Commit moved files
+        run: |
+          git config user.name "ai-hebrew-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "publish run $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push

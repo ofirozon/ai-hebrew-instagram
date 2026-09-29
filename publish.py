@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""Publish any due Instagram post from scheduled/ for בינה בקטנה.
+
+A scheduled post is a directory:
+    scheduled/<YYYY-MM-DDTHHMM>/post.png     (image, time is UTC)
+    scheduled/<YYYY-MM-DDTHHMM>/caption.txt  (caption text)
+
+It is published once its slot time is in the past, then moved to
+published/ so it can never be sent twice. The image is fetched by
+Instagram from its raw.githubusercontent.com URL, so this script must
+run AFTER the post's commit is pushed and visible there.
+
+Env:
+    IG_ACCESS_TOKEN   long-lived Instagram access token
+    IG_USER_ID        Instagram professional account id (from /me)
+    MAX_LATE_HOURS    skip posts more than this many hours overdue (default 20)
+    DRY_RUN           if "1", print what would happen and change nothing
+"""
+import json
+import os
+import pathlib
+import sys
+import time
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+
+from card_check import is_valid_card
+
+ROOT = pathlib.Path(__file__).resolve().parent
+SCHEDULED = ROOT / "scheduled"
+PUBLISHED = ROOT / "published"
+REJECTED = ROOT / "rejected"
+LOG = ROOT / "published-log.jsonl"
+
+GRAPH = "https://graph.instagram.com/v21.0"
+RAW_BASE = "https://raw.githubusercontent.com/ofirozon/ai-hebrew-instagram/main"
+
+MAX_LATE_HOURS = float(os.environ.get("MAX_LATE_HOURS", "20"))
+DRY_RUN = os.environ.get("DRY_RUN") == "1"
+
+# Instagram transcodes an uploaded reel before the container is publishable.
+# Measured on a 30-second 1080x1920 clip: well over a minute. 10 minutes of
+# headroom costs nothing, since the job is idle-waiting either way.
+REEL_STATUS_TRIES = 60
+REEL_STATUS_DELAY = 10
+
+
+def slot_time(path: pathlib.Path):
+    try:
+        return datetime.strptime(path.name, "%Y-%m-%dT%H%M").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def api_post(url, data):
+    body = urllib.parse.urlencode(data).encode()
+    req = urllib.request.Request(url, data=body, method="POST")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode())
+
+
+def api_get(url):
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        return json.loads(resp.read().decode())
+
+
+def wait_finished(creation_id: str, token: str, tries=20, delay=5):
+    for _ in range(tries):
+        status = api_get(f"{GRAPH}/{creation_id}?fields=status_code&access_token={token}")
+        code = status.get("status_code")
+        if code == "FINISHED":
+            return
+        if code == "ERROR":
+            raise RuntimeError(f"container failed processing: {status}")
+        time.sleep(delay)
+    raise RuntimeError("container never finished processing")
+
+
+def publish_single(slot_dir: pathlib.Path, caption: str, token: str, ig_user_id: str):
+    image_url = f"{RAW_BASE}/scheduled/{slot_dir.name}/post.png"
+
+    created = api_post(f"{GRAPH}/{ig_user_id}/media", {
+        "image_url": image_url,
+        "caption": caption,
+        "access_token": token,
+    })
+    if "id" not in created:
+        raise RuntimeError(f"container creation failed: {created}")
+    creation_id = created["id"]
+    wait_finished(creation_id, token)
+
+    published = api_post(f"{GRAPH}/{ig_user_id}/media_publish", {
+        "creation_id": creation_id,
+        "access_token": token,
+    })
+    if "id" not in published:
+        raise RuntimeError(f"media_publish failed: {published}")
+    return published["id"]
+
+
+def publish_carousel(slot_dir: pathlib.Path, image_names, caption: str, token: str, ig_user_id: str):
+    child_ids = []
+    for name in image_names:
+        image_url = f"{RAW_BASE}/scheduled/{slot_dir.name}/{name}"
+        created = api_post(f"{GRAPH}/{ig_user_id}/media", {
+            "image_url": image_url,
+            "is_carousel_item": "true",
+            "access_token": token,
+        })
+        if "id" not in created:
+            raise RuntimeError(f"carousel child container creation failed ({name}): {created}")
+        wait_finished(created["id"], token)
+        child_ids.append(created["id"])
+
+    parent = api_post(f"{GRAPH}/{ig_user_id}/media", {
+        "media_type": "CAROUSEL",
+        "children": ",".join(child_ids),
+        "caption": caption,
+        "access_token": token,
+    })
+    if "id" not in parent:
+        raise RuntimeError(f"carousel parent container creation failed: {parent}")
+    creation_id = parent["id"]
+    wait_finished(creation_id, token)
+
+    published = api_post(f"{GRAPH}/{ig_user_id}/media_publish", {
+        "creation_id": creation_id,
+        "access_token": token,
+    })
+    if "id" not in published:
+        raise RuntimeError(f"media_publish failed: {published}")
+    return published["id"]
+
+
+def publish_reel(slot_dir: pathlib.Path, video_url: str, caption: str, token: str, ig_user_id: str):
+    """Publish the slot as a Reel.
+
+    Video containers take minutes, not seconds: Instagram downloads and
+    transcodes the file before the container reports FINISHED, so this waits
+    far longer than the image path does. Publishing a Reel before it finishes
+    just fails, and a failed slot is skipped for the day.
+    """
+    created = api_post(f"{GRAPH}/{ig_user_id}/media", {
+        "media_type": "REELS",
+        "video_url": video_url,
+        "caption": caption,
+        "share_to_feed": "true",
+        "access_token": token,
+    })
+    if "id" not in created:
+        raise RuntimeError(f"reel container creation failed: {created}")
+    creation_id = created["id"]
+    wait_finished(creation_id, token, tries=REEL_STATUS_TRIES, delay=REEL_STATUS_DELAY)
+
+    published = api_post(f"{GRAPH}/{ig_user_id}/media_publish", {
+        "creation_id": creation_id,
+        "access_token": token,
+    })
+    if "id" not in published:
+        raise RuntimeError(f"media_publish failed: {published}")
+    return published["id"]
+
+
+def publish_one(slot_dir: pathlib.Path, token: str, ig_user_id: str):
+    caption = (slot_dir / "caption.txt").read_text(encoding="utf-8")
+
+    # A reel.json means generate.py built a video for this slot and the queue
+    # script uploaded it; the URL it points at is a GitHub release asset, not
+    # a file in the repo, so the repo never carries megabytes of video.
+    reel_meta = slot_dir / "reel.json"
+    if reel_meta.is_file():
+        meta = json.loads(reel_meta.read_text(encoding="utf-8"))
+        video_url = meta.get("video_url")
+        if video_url:
+            try:
+                return publish_reel(slot_dir, video_url, caption, token, ig_user_id)
+            except Exception as e:
+                # Nothing is live at this point (a failure here is either the
+                # container never finishing or media_publish being rejected),
+                # so the carousel built for the same slot is still a safe
+                # thing to send. Losing the reel beats losing the day.
+                print(f"{slot_dir.name}: reel publish failed ({e}), falling back to the carousel",
+                      file=sys.stderr)
+        else:
+            print(f"{slot_dir.name}: reel.json has no video_url, falling back to the carousel",
+                  file=sys.stderr)
+
+    carousel_images = sorted(
+        (p.name for p in slot_dir.glob("post_*.png")),
+        key=lambda n: int(n.split("_")[1].split(".")[0]),
+    )
+    if carousel_images:
+        return publish_carousel(slot_dir, carousel_images, caption, token, ig_user_id)
+    return publish_single(slot_dir, caption, token, ig_user_id)
+
+
+def main() -> int:
+    token = os.environ.get("IG_ACCESS_TOKEN")
+    ig_user_id = os.environ.get("IG_USER_ID")
+    if not token or not ig_user_id:
+        print("IG_ACCESS_TOKEN / IG_USER_ID not set, nothing to do.", file=sys.stderr)
+        return 0
+
+    if not SCHEDULED.is_dir():
+        print("No scheduled/ directory, nothing to do.")
+        return 0
+
+    now = datetime.now(timezone.utc)
+    due = []
+    for slot_dir in sorted(SCHEDULED.iterdir()):
+        if not slot_dir.is_dir():
+            continue
+        when = slot_time(slot_dir)
+        if when is None:
+            print(f"skip (bad name): {slot_dir.name}", file=sys.stderr)
+            continue
+        if when <= now:
+            due.append((when, slot_dir))
+
+    if not due:
+        print("Nothing due.")
+        return 0
+
+    published, failed = 0, 0
+    for when, slot_dir in due:
+        late_hours = (now - when).total_seconds() / 3600
+        if late_hours > MAX_LATE_HOURS:
+            print(f"skip (too late, {late_hours:.1f}h): {slot_dir.name}")
+            continue
+
+        if DRY_RUN:
+            print(f"[DRY RUN] would publish {slot_dir.name}")
+            continue
+
+        # Final gate: never publish anything that isn't actually our
+        # rendered card. This is what should have caught the 18.9.2026
+        # incident (a browser error-page screenshot got published) even
+        # if a bad image somehow slipped past generate.py's own check.
+        # Carousel slots (post_1.png, post_2.png, ...) get every slide
+        # checked; a single bad slide rejects the whole slot, since a
+        # carousel publishes all its children together or not at all.
+        images = sorted(slot_dir.glob("post_*.png")) or [slot_dir / "post.png"]
+        bad = None
+        for img in images:
+            ok, reason = is_valid_card(img)
+            if not ok:
+                bad = (img.name, reason)
+                break
+        if bad is not None:
+            print(f"REJECTED {slot_dir.name}: {bad[0]}: {bad[1]}", file=sys.stderr)
+            REJECTED.mkdir(exist_ok=True)
+            slot_dir.rename(REJECTED / slot_dir.name)
+            failed += 1
+            continue
+
+        try:
+            media_id = publish_one(slot_dir, token, ig_user_id)
+        except Exception as e:
+            print(f"FAILED {slot_dir.name}: {e}", file=sys.stderr)
+            failed += 1
+            continue
+
+        PUBLISHED.mkdir(exist_ok=True)
+        dest = PUBLISHED / slot_dir.name
+        slot_dir.rename(dest)
+        with LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "slot": slot_dir.name,
+                "media_id": media_id,
+                "published_at": now.isoformat(),
+            }, ensure_ascii=False) + "\n")
+        print(f"published {slot_dir.name} -> media {media_id}")
+        published += 1
+
+    print(f"done: {published} published, {failed} failed")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
