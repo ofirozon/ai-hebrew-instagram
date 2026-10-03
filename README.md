@@ -34,7 +34,7 @@ a full queue warm.
 3. Store the token in the Mac's Keychain so the daily refresh can keep it alive:
 
    ```
-   security add-generic-password -a aihebrew -s ai-hebrew-ig-token -w '<token>' -U
+   security add-generic-password -a binah -s binah-ig-token -w '<token>' -U
    ```
 
 4. Put both values in this repo's GitHub secrets:
