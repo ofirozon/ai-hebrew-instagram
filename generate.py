@@ -43,7 +43,10 @@ SEEN_FILE = ROOT / "seen-headlines.json"
 SEEN_TERMS_FILE = ROOT / "seen-terms.json"
 
 BRAND = "בינה בקטנה"
-HANDLE = "@binabiktana"
+# The connected account. This said @binabiktana for days while the account
+# that actually exists and publishes is @ai_il_core, so every card carried
+# a handle nobody could follow. Keep it equal to the real account.
+HANDLE = "@ai_il_core"
 
 # 10:00 and 17:00 UTC are 13:00 and 20:00 Israel time: lunch break and the
 # evening scroll. Deliberately not the morning, which is his work block and
