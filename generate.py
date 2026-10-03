@@ -60,13 +60,36 @@ COPY_TIMEOUT = 180
 # Hebrew AI coverage is thin and slow, so the feeds are English and the model
 # writes the Hebrew. Keep these general-audience: a paper-of-the-day feed
 # produces posts nobody outside the field can use.
+# Ofir, 3.10.2026: "הפוסטים האלה לא אמורים להיות גנריים בכלל... חדשות
+# שאנשים יעבירו אחד לשני". The trade press was the root cause. TechCrunch,
+# The Verge and VentureBeat mostly publish funding rounds, product launches
+# and enterprise announcements, and no one forwards a funding round.
+#
+# These feeds carry the stories that actually travel. Hacker News with a
+# points floor is the strongest of them, because the score is other people
+# having already found the story interesting, which is the exact signal we
+# want and the only one here that is measured rather than guessed.
 RSS_FEEDS = [
+    # crowd-validated: only stories that already cleared 150 points
+    "https://hnrss.org/newest?q=AI+OR+LLM+OR+OpenAI+OR+Anthropic+OR+Gemini&points=150",
+    # the weird, the investigative, the uncomfortable
+    "https://www.404media.co/rss/",
+    # depth, and the best writing on models behaving unexpectedly
+    "https://feeds.arstechnica.com/arstechnica/index",
+    "https://simonwillison.net/atom/everything/",
+    # kept, but now a minority of the pool rather than all of it
     "https://techcrunch.com/category/artificial-intelligence/feed/",
     "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",
-    "https://venturebeat.com/category/ai/feed/",
 ]
 
-CATEGORY_CYCLE = ["news", "tool", "concept", "prompt"]
+# Four categories in equal rotation meant every fourth post was "here is what
+# a chatbot is", which is the definition of the generic content Ofir objected
+# to on 3.10.2026. Stories are what get forwarded, so stories dominate. The
+# prompt slot stays because practical value is itself a sharing driver
+# (Berger's STEPPS): a prompt someone can copy makes the sharer look useful.
+# `concept` is gone entirely; explaining a term is the least forwardable
+# thing this page can do.
+CATEGORY_CYCLE = ["news", "news", "prompt", "news", "news", "tool"]
 
 CATEGORY_META = {
     "news":    {"tag": "חדשות AI",   "eyebrow": "מה קרה"},
@@ -221,21 +244,100 @@ def fetch_headlines():
         if key not in seen_titles:
             seen_titles.add(key)
             unique.append(item)
-    return unique
+    # 404 Media and Ars Technica are general technology feeds, so most of what
+    # they carry is not about AI at all. Filter on the text rather than trust
+    # the source.
+    return [i for i in unique if _mentions_ai(i)]
+
+
+_AI_WORDS = re.compile(
+    r"\b(ai|a\.i\.|llm|llms|chatbot|chatgpt|openai|anthropic|claude|gemini|"
+    r"copilot|midjourney|deepfake|neural|machine learning|language model|"
+    r"agentic|ai agent|gpt|grok|nvidia|hallucinat|prompt injection)\b",
+    re.IGNORECASE)
+
+
+def _mentions_ai(item):
+    return bool(_AI_WORDS.search(item["title"] + " " + item.get("description", "")))
 
 
 def is_on_brand(headline):
     return not OFF_BRAND_PATTERN.search(headline)
 
 
+# How many fresh candidates to put in front of the model before it chooses.
+# Small enough to stay one cheap call, large enough that a genuinely strange
+# story somewhere down the feed can still win.
+SHORTLIST = 25
+
+_PICK_PROMPT = """להלן {n} כותרות מעולם ה-AI. בחר את **אחת** שהכי תעבוד כפוסט
+באינסטגרם בעברית לקהל רחב שלא עובד בהייטק.
+
+הקריטריון היחיד: **האם מישהו ישלח את זה לחבר?**
+
+מה שעובד, לפי סדר יורד:
+1. משהו ש-AI עשה שאף אחד לא התכוון שיעשה. בריחה ממגבלות, עקיפת כללים,
+   התנהגות מפתיעה של מודל, פריצה.
+2. סיפור עם טוויסט, או משהו מצחיק, מוזר או מביך.
+3. משהו שנוגע לחיים של אנשים רגילים: עבודה, כסף, פרטיות, ילדים, רמאות.
+4. מספר או עובדה שגורמת ל"רגע מה?!"
+
+מה שלא עובד ואין לבחור בו:
+- גיוסי הון, שווי חברות, מינויים, שותפויות עסקיות
+- השקת מוצר או גרסה חדשה בלי סיפור מאחוריה
+- מאמרים אקדמיים, benchmarks, ביקורות כלי
+- כל דבר שמעניין רק מי שעובד בתעשייה
+
+הכותרות:
+{items}
+
+החזר JSON בלבד: {{"index": <מספר הכותרת שבחרת>, "why": "<משפט אחד בעברית,
+למה דווקא היא תעבור הלאה>"}}"""
+
+
+def _llm_json(prompt, timeout=COPY_TIMEOUT):
+    """One model call that is expected to answer with a JSON object."""
+    out = subprocess.run(
+        ["with-claude-token", "claude", "-p", prompt, "--output-format", "text"],
+        capture_output=True, text=True, timeout=timeout, check=True,
+    ).stdout
+    match = re.search(r"\{.*\}", out, re.DOTALL)
+    return json.loads(match.group(0)) if match else None
+
+
 def pick_headline(candidates, seen):
-    for item in candidates:
-        if item["title"] in seen:
-            continue
-        if not is_on_brand(item["title"]):
-            continue
-        return item
-    return None
+    """Choose the most forwardable story, not merely the newest one.
+
+    Taking the top of the feed is what produced a run of posts explaining what
+    a chatbot is. Feed order is recency, and recency has nothing to do with
+    whether a story is worth passing on. The model reads a shortlist and picks
+    on one criterion: would somebody send this to a friend.
+
+    Falls back to feed order if the call fails, so a model hiccup costs a
+    duller post rather than an empty slot.
+    """
+    fresh = [i for i in candidates
+             if i["title"] not in seen and is_on_brand(i["title"])]
+    if not fresh:
+        return None
+    if len(fresh) == 1:
+        return fresh[0]
+
+    shortlist = fresh[:SHORTLIST]
+    listing = "\n".join(f"{n}. {i['title']}" for n, i in enumerate(shortlist))
+    try:
+        got = _llm_json(_PICK_PROMPT.format(n=len(shortlist), items=listing))
+        idx = int(got["index"])
+        if 0 <= idx < len(shortlist):
+            why = str(got.get("why", "")).strip()
+            print(f"  picked: {shortlist[idx]['title'][:70]}")
+            if why:
+                print(f"  because: {why[:110]}")
+            return shortlist[idx]
+        print(f"WARNING: pick index {idx} out of range, using feed order", file=sys.stderr)
+    except Exception as e:
+        print(f"WARNING: story pick failed ({e}), using feed order", file=sys.stderr)
+    return fresh[0]
 
 
 def pick_from_list(pool, seen):
@@ -257,11 +359,11 @@ _NEWS_PROMPT = """אתה כותב עבור "בינה בקטנה", עמוד אי�
 
 כתוב את הפוסט בעברית. החזר אך ורק אובייקט JSON, בלי שום טקסט סביבו, עם המפתחות האלה:
 
-"hook": שורה אחת, עד 55 תווים, לשקופית הראשונה. אסור לחזור על הכותרת. פתח במתח או במספר הספציפי שבסיפור, כך שמישהו ירצה לדעת את ההמשך.
+"hook": שורה אחת, עד 55 תווים, לשקופית הראשונה. אסור לחזור על הכותרת. פתח בחלק הכי מפתיע או הכי מביך בסיפור, זה שגורם למישהו לעצור ולהגיד "רגע, מה?". מספר ספציפי עדיף על תיאור כללי.
 "headline": הכותרת עצמה בעברית, עד 90 תווים, ניסוח עיתונאי נקי.
 "concept": הרעיון שאפשר לקחת מזה הלאה, 2 עד 5 מילים.
 "explain": 2 עד 3 משפטים, עד 300 תווים סך הכל, שמסבירים מה בעצם קרה ולמה זה משנה למישהו רגיל. מספרים ושמות אמיתיים, בלי מילות מילוי.
-"takeaway": משפט אחד, עד 80 תווים, מה לעשות עם זה בפועל.
+"takeaway": משפט אחד, עד 80 תווים. מה לקחת מזה, או מה זה אומר על הכיוון שאליו הדברים הולכים. לא עצה גנרית.
 "question": שאלה אחת ספציפית לתגובות, עד 80 תווים. לא שאלה גנרית, היא חייבת להתאים רק לפוסט הזה.
 "tags": בדיוק 4 האשטגים עם הסולמית, בעברית או באנגלית, ספציפיים לנושא. בלי האשטג של שם העמוד.
 
@@ -428,9 +530,27 @@ def write_post_copy(category, news=None, item=None):
     return _fallback_copy(category, news=news, item=item)
 
 
+# Every caption names the destination. Until 3.10.2026 no post mentioned the
+# Telegram channel at all, so a scroller who liked a card had nowhere to go:
+# the account is the funnel, the channel is the product. No raw t.me URL, since
+# a link in an Instagram caption is not clickable anyway and the bio link is
+# the habit worth training.
+CHANNEL_CTA = "📲 עוד כלים וחדשות AI בעברית, כל יום בערוץ בינה בקטנה. הלינק בביו."
+
+
 def make_caption(category, copy):
     tag = CATEGORY_META[category]["tag"]
-    tags = " ".join(["#בינהבקטנה", *copy["tags"]])
+    # The model sometimes returns the brand tag itself, spelled with
+    # underscores (#בינה_בקטנה), which shipped next to our own #בינהבקטנה and
+    # read as a typo. Compare tags ignoring underscores and keep the first.
+    tags, seen_tags = [], set()
+    for t in ["#בינהבקטנה", *copy["tags"]]:
+        key = t.replace("_", "").lower()
+        if key in seen_tags:
+            continue
+        seen_tags.add(key)
+        tags.append(t)
+    tags = " ".join(tags)
     return (
         f"{tag}\n\n"
         f"{copy['hook']}\n\n"
@@ -439,6 +559,7 @@ def make_caption(category, copy):
         f"{copy['explain']}\n\n"
         f"{copy['takeaway']}\n\n"
         f"{copy['question']}\n\n"
+        f"{CHANNEL_CTA}\n\n"
         f"{tags}"
     )
 
