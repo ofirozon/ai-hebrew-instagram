@@ -14,6 +14,8 @@ Env:
     IG_ACCESS_TOKEN   long-lived Instagram access token
     IG_USER_ID        Instagram professional account id (from /me)
     MAX_LATE_HOURS    skip posts more than this many hours overdue (default 20)
+    MAX_PER_RUN       how many slots one run may publish (default 1)
+    MIN_GAP_MINUTES   minimum spacing between two publishes (default 45)
     DRY_RUN           if "1", print what would happen and change nothing
 """
 import json
@@ -31,12 +33,22 @@ ROOT = pathlib.Path(__file__).resolve().parent
 SCHEDULED = ROOT / "scheduled"
 PUBLISHED = ROOT / "published"
 REJECTED = ROOT / "rejected"
+SKIPPED = ROOT / "skipped"
 LOG = ROOT / "published-log.jsonl"
 
 GRAPH = "https://graph.instagram.com/v21.0"
 RAW_BASE = "https://raw.githubusercontent.com/ofirozon/ai-hebrew-instagram/main"
 
 MAX_LATE_HOURS = float(os.environ.get("MAX_LATE_HOURS", "20"))
+
+# One slot per run, and never two publishes inside the same 45 minutes. The
+# stock account learned this the hard way on 3.10.2026: a backlog of three
+# slots went live inside two minutes because the loop published every due slot
+# in one pass. Two posts with the same timestamp compete for the same
+# impressions, and the profile reads as a dump. The workflow fires every 10
+# minutes, so a backlog drains one post at a time instead.
+MAX_PER_RUN = int(os.environ.get("MAX_PER_RUN", "1"))
+MIN_GAP_MINUTES = float(os.environ.get("MIN_GAP_MINUTES", "45"))
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 
 # Instagram transcodes an uploaded reel before the container is publishable.
@@ -51,6 +63,30 @@ def slot_time(path: pathlib.Path):
         return datetime.strptime(path.name, "%Y-%m-%dT%H%M").replace(tzinfo=timezone.utc)
     except ValueError:
         return None
+
+
+def last_publish_time():
+    """When the most recent post actually went live, or None.
+
+    Read from published-log.jsonl rather than from file mtimes, because every
+    run starts from a fresh checkout where every file is seconds old.
+    """
+    if not LOG.is_file():
+        return None
+    newest = None
+    for line in LOG.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            when = datetime.fromisoformat(json.loads(line).get("published_at"))
+        except Exception:
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        if newest is None or when > newest:
+            newest = when
+    return newest
 
 
 def api_post(url, data):
@@ -223,14 +259,34 @@ def main() -> int:
         return 0
 
     published, failed = 0, 0
+    last_live = last_publish_time()
     for when, slot_dir in due:
         late_hours = (now - when).total_seconds() / 3600
         if late_hours > MAX_LATE_HOURS:
+            # Park it instead of leaving it in scheduled/, where every run from
+            # now on would re-read and re-skip it and any count of what is still
+            # queued would stay wrong.
             print(f"skip (too late, {late_hours:.1f}h): {slot_dir.name}")
+            if not DRY_RUN:
+                SKIPPED.mkdir(exist_ok=True)
+                slot_dir.rename(SKIPPED / slot_dir.name)
             continue
+
+        if published >= MAX_PER_RUN:
+            print(f"deferred (already published {published} this run): {slot_dir.name}")
+            break
+
+        if last_live is not None:
+            gap = (now - last_live).total_seconds() / 60
+            if gap < MIN_GAP_MINUTES:
+                print(f"deferred ({gap:.0f}min since the last post, "
+                      f"want {MIN_GAP_MINUTES:.0f}): {slot_dir.name}")
+                break
 
         if DRY_RUN:
             print(f"[DRY RUN] would publish {slot_dir.name}")
+            published += 1
+            last_live = now
             continue
 
         # Final gate: never publish anything that isn't actually our
@@ -272,6 +328,7 @@ def main() -> int:
             }, ensure_ascii=False) + "\n")
         print(f"published {slot_dir.name} -> media {media_id}")
         published += 1
+        last_live = now
 
     print(f"done: {published} published, {failed} failed")
     return 1 if failed else 0
