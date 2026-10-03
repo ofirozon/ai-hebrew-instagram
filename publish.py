@@ -237,7 +237,7 @@ def publish_one(slot_dir: pathlib.Path, token: str, ig_user_id: str):
     return publish_single(slot_dir, caption, token, ig_user_id)
 
 
-def check_account(token: str) -> bool:
+def check_account(token: str, ig_user_id: str) -> bool:
     """Refuse to publish unless the token belongs to EXPECTED_USERNAME.
 
     Two Instagram pipelines now run from the same Mac into two different
@@ -247,7 +247,7 @@ def check_account(token: str) -> bool:
     run makes that mistake impossible instead of merely unlikely.
     """
     try:
-        me = api_get(f"{GRAPH}/me?fields=username&access_token={token}")
+        me = api_get(f"{GRAPH}/me?fields=id,username&access_token={token}")
     except Exception as e:
         print(f"could not identify the connected account ({e}), not publishing",
               file=sys.stderr)
@@ -257,6 +257,11 @@ def check_account(token: str) -> bool:
         print(f"WRONG ACCOUNT: token belongs to @{username}, expected "
               f"@{EXPECTED_USERNAME}. Not publishing anything.", file=sys.stderr)
         return False
+    if me.get("id") != ig_user_id:
+        print(f"MISMATCHED ID: the token is @{username} ({me.get('id')}) but "
+              f"IG_USER_ID is {ig_user_id}. Not publishing anything.",
+              file=sys.stderr)
+        return False
     print(f"connected account: @{username}")
     return True
 
@@ -265,10 +270,13 @@ def main() -> int:
     token = os.environ.get("IG_ACCESS_TOKEN")
     ig_user_id = os.environ.get("IG_USER_ID")
     if not token or not ig_user_id:
-        print("IG_ACCESS_TOKEN / IG_USER_ID not set, nothing to do.", file=sys.stderr)
-        return 0
+        # Exit non-zero, not 0. An empty secret used to print this and succeed,
+        # which is how this repo spent its first hours connected but unable to
+        # publish while every run showed a green tick.
+        print("IG_ACCESS_TOKEN / IG_USER_ID not set, cannot publish.", file=sys.stderr)
+        return 1
 
-    if not check_account(token):
+    if not check_account(token, ig_user_id):
         return 1
 
     if not SCHEDULED.is_dir():

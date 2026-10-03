@@ -40,8 +40,8 @@ a full queue warm.
 4. Put both values in this repo's GitHub secrets:
 
    ```
-   gh secret set AI_IG_ACCESS_TOKEN --repo ofirozon/ai-hebrew-instagram --body '<token>'
-   gh secret set AI_IG_USER_ID      --repo ofirozon/ai-hebrew-instagram --body '<user id>'
+   gh secret set IG_ACCESS_TOKEN --repo ofirozon/ai-hebrew-instagram --body '<token>'
+   gh secret set IG_USER_ID      --repo ofirozon/ai-hebrew-instagram --body '<user id>'
    ```
 
 The repo must stay **public**. Instagram fetches each card from
