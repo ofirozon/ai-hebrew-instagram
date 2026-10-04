@@ -877,11 +877,31 @@ _CARD_CSS = """
     padding:14px 34px; border-radius:999px;
   }
   .slide-num { font-size:28px; font-weight:700; opacity:0.5; }
-  .headline { font-size:62px; font-weight:900; line-height:1.45; margin-top:56px; }
+  /* The body is one flex column, not loose siblings of the footer. Until
+     4.10.2026 the slide's parts were direct children of the page's
+     space-between flex, so the browser handed the leftover height to the gaps
+     between them and every slide got a different, arbitrary rhythm: the hook
+     card had a hole in its middle, the explain card had none. Now the page
+     splits top / body / footer and the spacing inside the body is set here. */
+  .body { flex:1; display:flex; flex-direction:column; justify-content:center; min-height:0; }
+  .headline { font-size:62px; font-weight:900; line-height:1.45; }
   .sub { font-size:32px; font-weight:400; line-height:1.7; opacity:0.85; margin-top:28px; }
   .eyebrow {
     font-size:26px; font-weight:900; letter-spacing:2px;
-    color:#c4b5fd; margin-top:56px;
+    color:#c4b5fd; margin-bottom:30px;
+  }
+  /* The explain slide used .headline, so 300 characters came out at weight
+     900 filling the card edge to edge, which is what Ofir was looking at on
+     4.10.2026 when he said the account looks bad. This is the stock account's
+     lesson panel, which he chose over the frameless version on 30.9.2026,
+     ported across: a translucent box, a hairline border, and normal weight so
+     the eye has somewhere to rest. */
+  .lesson {
+    background:rgba(255,255,255,0.055);
+    border:1px solid rgba(255,255,255,0.10);
+    border-radius:28px;
+    padding:46px 42px;
+    font-weight:400; line-height:1.8;
   }
   .source {
     font-size:26px; font-weight:400; line-height:1.6; opacity:0.6;
@@ -891,15 +911,30 @@ _CARD_CSS = """
   .swipe { font-size:28px; font-weight:700; opacity:0.6; margin-top:40px; }
   .accent { color:#c4b5fd; }
   .footer { border-top:2px solid rgba(255,255,255,0.15); padding-top:26px; }
-  .footer-row { display:flex; justify-content:space-between; align-items:center; }
+  .footer-row { display:flex; justify-content:space-between; align-items:center; gap:24px; }
   .brand { font-size:36px; font-weight:900; }
   .handle { font-size:26px; opacity:0.6; }
+  /* A carousel only works if the first card admits it is a carousel. "1/3" in
+     the corner is information; the dots are a shape the eye reads without
+     reading. Laid out LTR deliberately: these are a position indicator rather
+     than text, and Instagram does not mirror its own dots for Hebrew either. */
+  .dots { display:flex; gap:12px; align-items:center; direction:ltr; }
+  .dots span { width:12px; height:12px; border-radius:6px; background:rgba(255,255,255,0.28); }
+  .dots span.on { width:48px; background:#f6f4fb; }
   /* A Latin fragment inside a Hebrew sentence keeps its own direction. */
   .ltr { direction:ltr; unicode-bidi:isolate; display:inline-block; }
 """
 
 
-def _card_shell(top_row_html, body_html):
+def _dots(position, total):
+    """The carousel position as a shape rather than as a number."""
+    return '<div class="dots">' + "".join(
+        f'<span class="{"on" if i == position else ""}"></span>'
+        for i in range(1, total + 1)
+    ) + "</div>"
+
+
+def _card_shell(top_row_html, body_html, dots_html=""):
     return f"""<!DOCTYPE html>
 <html lang="he" dir="rtl">
 <head>
@@ -912,6 +947,7 @@ def _card_shell(top_row_html, body_html):
   <div class="footer">
     <div class="footer-row">
       <div class="brand">בינה <span class="accent">בקטנה</span></div>
+      {dots_html}
       <div class="handle ltr">{HANDLE}</div>
     </div>
   </div>
@@ -935,7 +971,12 @@ def _fit(text, steps):
 
 
 _HOOK_STEPS = [(45, 62), (70, 54), (95, 46), (130, 40)]
-_EXPLAIN_STEPS = [(180, 52), (260, 46), (340, 40), (430, 34)]
+# Retuned 4.10.2026 alongside the panel. These were sized for weight-900 text
+# sitting directly on the background, where a large size was the only thing
+# giving the slide any presence. Inside the panel, at weight 400 with a 1.8
+# line-height, the old sizes overflow the box, so every tier drops and the
+# scale now starts roughly where the old one ended.
+_EXPLAIN_STEPS = [(120, 46), (180, 42), (240, 38), (310, 34), (430, 30)]
 _TAKEAWAY_STEPS = [(60, 52), (90, 46), (130, 40)]
 
 
@@ -960,7 +1001,7 @@ def render_slide_html(kind, position, total, category, copy):
     elif kind == "explain":
         body = (
             f'<div class="eyebrow">{escape(meta["eyebrow"])}</div>'
-            f'<div class="headline" style="font-size:{_fit(copy["explain"], _EXPLAIN_STEPS)}px;">'
+            f'<div class="lesson" style="font-size:{_fit(copy["explain"], _EXPLAIN_STEPS)}px;">'
             f'{escape(copy["explain"])}</div>'
         )
     else:
@@ -973,7 +1014,8 @@ def render_slide_html(kind, position, total, category, copy):
             # carries the frequency promise instead of repeating it.
             '<div class="swipe">פוסט חדש כאן כל יום</div>'
         )
-    return _card_shell(top_row, body)
+    return _card_shell(top_row, f'<div class="body">{body}</div>',
+                       _dots(position, total))
 
 
 def render_png(html_path: pathlib.Path, png_path: pathlib.Path):
@@ -1041,7 +1083,48 @@ def build_slot(slot_dir: pathlib.Path, category, copy, news=None,
     return record
 
 
+def rebuild_slot(slot_dir: pathlib.Path):
+    """Re-render a queued slot's cards from the copy already in source.json.
+
+    Added 4.10.2026, and its absence was a real gap rather than a missing
+    convenience: the stock account has had this since September, so a design
+    change there reaches the posts already queued, while here the same change
+    only affected posts generated afterwards and the queue went out looking
+    like the old card. The words are not touched, only the pixels and the
+    caption, which is a pure function of the stored copy.
+    """
+    source = slot_dir / "source.json"
+    if not source.is_file():
+        raise RuntimeError(f"no source.json in {slot_dir}, nothing to rebuild from")
+    data = json.loads(source.read_text(encoding="utf-8"))
+    category, copy = data["category"], data["copy"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = pathlib.Path(tmp)
+        for i, kind in enumerate(SLIDE_PLAN, start=1):
+            html = render_slide_html(kind, i, len(SLIDE_PLAN), category, copy)
+            html_path = tmp / f"slide_{i}.html"
+            html_path.write_text(html, encoding="utf-8")
+            render_png(html_path, slot_dir / f"post_{i}.png")
+
+    (slot_dir / "caption.txt").write_text(
+        make_caption(category, copy), encoding="utf-8")
+    print(f"Rebuilt {slot_dir.name} [{category}]: {len(SLIDE_PLAN)} slides")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "rebuild":
+        targets = sys.argv[2:] or sorted(
+            str(p) for p in SCHEDULED.iterdir() if p.is_dir())
+        failed = 0
+        for target in targets:
+            try:
+                rebuild_slot(pathlib.Path(target))
+            except Exception as e:
+                print(f"ERROR rebuilding {target}: {e}", file=sys.stderr)
+                failed += 1
+        return 1 if failed else 0
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true",
                         help="render one post into a temp dir and queue nothing")
