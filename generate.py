@@ -34,6 +34,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from html import escape, unescape
 
+import copy_check
 from card_check import is_valid_card
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -56,6 +57,13 @@ TARGET_QUEUE_DEPTH = 6  # three days of cover at 2/day
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 COPY_TIMEOUT = 180
+
+# Item 84: which rules from instagram-backlog.md this generation runs under,
+# stamped into every source.json. When a week of numbers comes back, this is
+# what says which change the week was testing. Update it when the generator's
+# rules change, not when the code is merely refactored.
+BACKLOG_ITEMS = [6, 7, 8, 9, 15, 18, 21, 22, 23, 24, 25, 26, 27, 28, 29, 32,
+                 33, 34, 35, 36, 37, 38, 39, 84, 95, 99]
 
 # Hebrew AI coverage is thin and slow, so the feeds are English and the model
 # writes the Hebrew. Keep these general-audience: a paper-of-the-day feed
@@ -206,6 +214,59 @@ def next_category_index():
     return n % len(CATEGORY_CYCLE)
 
 
+def recent_posts(limit=14):
+    """The last `limit` posts by slot name, newest first, as source.json dicts.
+
+    Slot names are ISO timestamps, so chronological order is a string sort.
+    """
+    found = []
+    for root in (SCHEDULED, PUBLISHED):
+        if not root.is_dir():
+            continue
+        for slot_dir in root.iterdir():
+            source = slot_dir / "source.json"
+            if not source.is_file():
+                continue
+            try:
+                found.append((slot_dir.name,
+                              json.loads(source.read_text(encoding="utf-8"))))
+            except Exception:
+                continue
+    found.sort(key=lambda pair: pair[0], reverse=True)
+    return [data for _, data in found[:limit]]
+
+
+def recent_openings(posts, depth=3):
+    """Item 37: the opening word of the last few hooks, to be avoided.
+
+    Three, not fourteen: by the fourth post back nobody remembers how it
+    started, and forbidding fourteen words starves the model of openings.
+    """
+    out = []
+    for data in posts[:depth]:
+        word = copy_check.opening_word((data.get("copy") or {}).get("hook", ""))
+        if word:
+            out.append(word)
+    return out
+
+
+def recent_subjects(posts):
+    """Item 36: what this account has already covered, in Hebrew.
+
+    The feeds are English and the posts are Hebrew, so there is no reliable
+    mechanical way to tell that "OpenAI sued over teen's death" and a different
+    outlet's wording of the same event are one story. The model is doing the
+    translating anyway, so it is the thing that can see the overlap: it gets the
+    recent Hebrew headlines and is told not to pick a story about any of them.
+    """
+    out = []
+    for data in posts:
+        headline = (data.get("copy") or {}).get("headline", "").strip()
+        if headline:
+            out.append(headline)
+    return out
+
+
 # --- sources -----------------------------------------------------------------
 
 def _text(node):
@@ -290,9 +351,21 @@ _PICK_PROMPT = """להלן {n} כותרות מעולם ה-AI. בחר את **אח
 
 הכותרות:
 {items}
-
+{covered}
 החזר JSON בלבד: {{"index": <מספר הכותרת שבחרת>, "why": "<משפט אחד בעברית,
 למה דווקא היא תעבור הלאה>"}}"""
+
+# Item 36. The exact-title check in seen-headlines.json cannot see that two
+# outlets wrote up the same event with different words, and across two
+# languages no keyword comparison can either. The model is translating anyway,
+# so it is the thing that can judge it.
+_COVERED_BLOCK = """
+העמוד כבר פרסם או שיבץ לתור את הסיפורים האלה בשבועיים האחרונים:
+{subjects}
+
+אל תבחר כותרת שמדברת על אותו אירוע או אותו נושא כמו אחד מהם, גם אם הניסוח
+שונה לגמרי. פוסט שני על אותו סיפור הוא אותו פוסט פעמיים.
+"""
 
 
 def _llm_json(prompt, timeout=COPY_TIMEOUT):
@@ -305,7 +378,7 @@ def _llm_json(prompt, timeout=COPY_TIMEOUT):
     return json.loads(match.group(0)) if match else None
 
 
-def pick_headline(candidates, seen):
+def pick_headline(candidates, seen, subjects=()):
     """Choose the most forwardable story, not merely the newest one.
 
     Taking the top of the feed is what produced a run of posts explaining what
@@ -325,8 +398,13 @@ def pick_headline(candidates, seen):
 
     shortlist = fresh[:SHORTLIST]
     listing = "\n".join(f"{n}. {i['title']}" for n, i in enumerate(shortlist))
+    covered = (
+        _COVERED_BLOCK.format(subjects="\n".join(f"- {s}" for s in subjects))
+        if subjects else ""
+    )
     try:
-        got = _llm_json(_PICK_PROMPT.format(n=len(shortlist), items=listing))
+        got = _llm_json(_PICK_PROMPT.format(n=len(shortlist), items=listing,
+                                            covered=covered))
         idx = int(got["index"])
         if 0 <= idx < len(shortlist):
             why = str(got.get("why", "")).strip()
@@ -340,6 +418,82 @@ def pick_headline(candidates, seen):
     return fresh[0]
 
 
+# --- reading the actual article ---------------------------------------------
+#
+# Found on 4.10.2026, and it had been live the whole time: a Hacker News feed
+# item has no summary at all. Its description is three lines of metadata:
+#
+#     Article URL: https://www.eff.org/deeplinks/2026/09/draftkings-using-ai...
+#     Comments URL: https://news.ycombinator.com/item?id=49896050
+#     Points: 570
+#
+# So for every story from the strongest feed in the list, the model was writing
+# a three-slide post from a headline and nothing else, and filling the gap with
+# whatever sounded right. The test run that caught this produced "according to a
+# New York Times investigation from September 2026" for a story that is an EFF
+# article. The date was right and the attribution was invented, and nothing in
+# the pipeline could have noticed.
+#
+# The fix is to go and read the article. Cheap (one fetch, for the one story
+# that was picked) and it changes what the model is working from.
+
+_ARTICLE_URL = re.compile(r"Article URL:\s*(\S+)")
+_TAG_SOUP = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.S | re.I)
+_TAGS = re.compile(r"<[^>]+>")
+ARTICLE_CHARS = 4000
+
+
+def fetch_article_text(url, limit=ARTICLE_CHARS):
+    """The readable text of a web page, or None.
+
+    Deliberately crude: no readability library, no parser, just tags stripped
+    and whitespace collapsed. The model does not need a clean extraction, it
+    needs the real sentences to exist somewhere in its input instead of being
+    guessed.
+    """
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            ctype = resp.headers.get("Content-Type", "")
+            if "html" not in ctype and "text" not in ctype:
+                return None
+            raw = resp.read(400_000).decode("utf-8", errors="replace")
+    except Exception as e:
+        print(f"WARNING: could not read {url}: {e}", file=sys.stderr)
+        return None
+    text = _TAGS.sub(" ", _TAG_SOUP.sub(" ", raw))
+    text = unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit] or None
+
+
+def enrich(news):
+    """Attach the article's own text to a picked story, in place.
+
+    Only for the story that won: enriching all 68 candidates would be 68
+    fetches to throw away 67 of them.
+    """
+    if not news:
+        return news
+    match = _ARTICLE_URL.search(news.get("description") or "")
+    url = match.group(1) if match else None
+    if not url:
+        return news
+    body = fetch_article_text(url)
+    news["url"] = url
+    if body:
+        news["description"] = body
+        print(f"  read {len(body)} chars from {url}")
+    else:
+        # No body text available. Say so in the words the model will read,
+        # rather than handing it metadata that looks like a summary.
+        news["description"] = (
+            "(אין תקציר. לא הצלחנו לקרוא את גוף הכתבה, ולכן אין שום פרט מעבר "
+            f"לכותרת. הכתבה מופיעה בכתובת {url})"
+        )
+    return news
+
+
 def pick_from_list(pool, seen):
     """First unused entry, or the oldest one if the whole pool has been used."""
     for name, definition in pool:
@@ -350,6 +504,26 @@ def pick_from_list(pool, seen):
 
 
 # --- copy --------------------------------------------------------------------
+
+# The stock account has had a flow-rules block in its prompts since 30.9.2026
+# and this one had nothing equivalent: each field was specified on its own, so
+# the model wrote three good slides that did not carry each other. Slide 2 would
+# answer a question slide 1 never asked, and slide 3 would summarise instead of
+# landing. Added 4.10.2026, covering backlog items 24, 25, 27, 28, 29, 32 and 38.
+_COPY_FLOW_RULES = """שלוש השקופיות נקראות ברצף, בשש שניות בסך הכל, ולכן הן חייבות למשוך אחת את השנייה:
+
+- ה-hook מעלה שאלה. ה-explain עונה בדיוק עליה, לא על שאלה שכנה. אם ה-explain היה מתאים גם מתחת ל-hook אחר, ה-hook שגוי.
+- ה-takeaway הוא המשפט שמישהו חוזר עליו לחבר. הוא לא מסכם את ה-explain, הוא מנחית אותו.
+- רעיון אחד בכל שקופית. אם יש בשקופית "וגם", או פסוקית שנייה שיכולה לעמוד לבד, לחתוך אותה.
+- אסור לחזור על שקופית שכבר נכתבה. אף שקופית לא נפתחת בהצגה מחדש של החברה, הכלי או המספר שהשקופית הקודמת כבר נתנה.
+- אסור משפט שמתאר את הפוסט במקום להיות הפוסט. כל משפט בסגנון "בפוסט הזה נסביר" או "חשוב להבין את הנושא" נמחק.
+- משפטים קצרים. הקורא גולל, והקלף צריך לשרוד מבט ולא קריאה.
+- קונקרטי עדיף על מלא. דבר אחד אמיתי שאפשר לדמיין עדיף על שלושה שמכסים את הנושא.
+- לכתוב לאדם אחד, בגוף שני. "אתה" עובד איפה ש"משתמשים" לא עובד.
+- מבחן הסף של הערוץ: מה זה נותן לקורא מחר בבוקר. אם התשובה היא "כלום, זה רק מעניין", הפוסט לא עובר. הקהל הוא עובדים, פרילנסרים ובעלי עסקים קטנים, לא אנשי הייטק.
+- ה-question חייבת להיות שאלה שמישהו שלא מבין כלום ב-AI יכול לענות עליה, על החוויה שלו, הניחוש שלו או מה שהוא עשה. לא שאלה על הגדרה ולא שאלה שדורשת ידע מוקדם.
+
+כלל העובדות, והוא חזק מכל כלל סגנון כאן: **כל פרט בפוסט חייב להופיע בחומר שנתנו לך.** אסור להוסיף שם של עיתון, של חוקר, של חברה או של מחקר שלא כתוב בחומר, אסור להוסיף מספר שלא כתוב בחומר, ואסור להשלים פרט חסר במשהו שנשמע סביר. אם אין בחומר תקציר ויש רק כותרת, כותבים פוסט שמסתמך על הכותרת בלבד ולא ממציאים את הפרטים. אם לא ברור מי פרסם, לא מזכירים אף גוף תקשורת. פוסט עם ייחוס שגוי הוא כשל חמור יותר מפוסט משעמם."""
 
 _NEWS_PROMPT = """אתה כותב עבור "בינה בקטנה", עמוד אינסטגרם בעברית שמסביר בינה מלאכותית לאנשים שלא עובדים בתחום.
 
@@ -366,6 +540,9 @@ _NEWS_PROMPT = """אתה כותב עבור "בינה בקטנה", עמוד אי�
 "takeaway": משפט אחד, עד 80 תווים. מה לקחת מזה, או מה זה אומר על הכיוון שאליו הדברים הולכים. לא עצה גנרית.
 "question": שאלה אחת ספציפית לתגובות, עד 80 תווים. לא שאלה גנרית, היא חייבת להתאים רק לפוסט הזה.
 "tags": בדיוק 4 האשטגים עם הסולמית. בחר רק תגיות שבן אדם באמת גולש בהן, כלומר תגיה רחבה שיש בה תוכן (למשל #בינהמלאכותית, #ChatGPT, #טכנולוגיה) או שם הכלי שעליו הפוסט. בלי תגיות מומצאות ובלי צירופים ארוכים שאף אחד לא מחפש, בלי קו תחתון, ובלי האשטג של שם העמוד. בחר רק תגיות שבן אדם באמת גולש בהן, כלומר תגיה רחבה שיש בה תוכן (למשל #בינהמלאכותית, #ChatGPT, #טכנולוגיה) או שם הכלי שעליו הפוסט. בלי תגיות מומצאות ובלי צירופים ארוכים שאף אחד לא מחפש, בלי קו תחתון, ובלי האשטג של שם העמוד.
+
+
+""" + _COPY_FLOW_RULES + """
 
 כללים: עברית תקנית וזורמת, לא תרגומית. בלי סלנג של מתכנתים. מונח באנגלית מותר רק אם אין לו שם עברי מקובל, ואז מסבירים אותו בשלוש מילים במקום. בלי הבטחות, בלי "ישנה את העולם", בלי סימני קריאה."""
 
@@ -386,6 +563,9 @@ _TOOL_PROMPT = """אתה כותב עבור "בינה בקטנה", עמוד אי�
 "question": שאלה ספציפית לתגובות, עד 80 תווים.
 "tags": בדיוק 4 האשטגים עם הסולמית. בחר רק תגיות שבן אדם באמת גולש בהן, כלומר תגיה רחבה שיש בה תוכן (למשל #בינהמלאכותית, #ChatGPT, #טכנולוגיה) או שם הכלי שעליו הפוסט. בלי תגיות מומצאות ובלי צירופים ארוכים שאף אחד לא מחפש, בלי קו תחתון, ובלי האשטג של שם העמוד.
 
+
+""" + _COPY_FLOW_RULES + """
+
 כללים: עברית זורמת, בלי שפה שיווקית, בלי "מהפכני". אם אתה לא בטוח בעובדה, אל תכתוב אותה."""
 
 _CONCEPT_PROMPT = """אתה כותב עבור "בינה בקטנה", עמוד אינסטגרם בעברית שמסביר בינה מלאכותית לאנשים שלא עובדים בתחום.
@@ -403,6 +583,9 @@ _CONCEPT_PROMPT = """אתה כותב עבור "בינה בקטנה", עמוד א
 "question": שאלה שמכריחה מישהו ליישם את המושג, עד 80 תווים.
 "tags": בדיוק 4 האשטגים עם הסולמית. בחר רק תגיות שבן אדם באמת גולש בהן, כלומר תגיה רחבה שיש בה תוכן (למשל #בינהמלאכותית, #ChatGPT, #טכנולוגיה) או שם הכלי שעליו הפוסט. בלי תגיות מומצאות ובלי צירופים ארוכים שאף אחד לא מחפש, בלי קו תחתון, ובלי האשטג של שם העמוד.
 
+
+""" + _COPY_FLOW_RULES + """
+
 כללים: עברית זורמת, בלי ז'רגון, בלי סימני קריאה."""
 
 _PROMPT_PROMPT = """אתה כותב עבור "בינה בקטנה", עמוד אינסטגרם בעברית שמסביר בינה מלאכותית לאנשים שלא עובדים בתחום.
@@ -419,6 +602,9 @@ _PROMPT_PROMPT = """אתה כותב עבור "בינה בקטנה", עמוד א�
 "takeaway": משפט אחד, עד 80 תווים, מתי זה הכי עוזר.
 "question": שאלה ספציפית לתגובות, עד 80 תווים.
 "tags": בדיוק 4 האשטגים עם הסולמית. בחר רק תגיות שבן אדם באמת גולש בהן, כלומר תגיה רחבה שיש בה תוכן (למשל #בינהמלאכותית, #ChatGPT, #טכנולוגיה) או שם הכלי שעליו הפוסט. בלי תגיות מומצאות ובלי צירופים ארוכים שאף אחד לא מחפש, בלי קו תחתון, ובלי האשטג של שם העמוד.
+
+
+""" + _COPY_FLOW_RULES + """
 
 כללים: עברית זורמת. הדוגמה חייבת להיות משהו שאפשר להדביק כמו שהוא, לא תיאור של דוגמה."""
 
@@ -466,36 +652,45 @@ _MAX_LEN = {"hook": 130, "headline": 150, "concept": 60,
             "explain": 430, "takeaway": 130, "question": 120}
 
 
-def _clean_copy(raw):
-    """Accept the model's JSON only if every field is usable AND in Hebrew."""
+def _clean_copy(raw, recent_openings=(), last_attempt=False, source_text=None):
+    """Accept the model's JSON only if every field is usable AND in Hebrew.
+
+    Returns (copy, problems). A copy of None means nothing usable came back. A
+    copy with problems attached is complete but failed a gate, and the problems
+    are phrased in Hebrew so they can be pasted into the retry prompt as is:
+    telling the model "that was wrong" costs a round trip that "explain is 480
+    chars, the ceiling is 430" does not.
+
+    On the last attempt the soft gates are reported but not enforced. The
+    alternative is the template copy, which fails more of these gates than any
+    model answer and says less.
+    """
     if not isinstance(raw, dict):
-        return None
+        return None, ["התשובה לא הייתה אובייקט JSON"]
     out = {}
     for key in _COPY_KEYS:
         value = raw.get(key)
         if key == "tags":
             if not isinstance(value, list):
-                return None
+                return None, ["tags לא היה מערך"]
             tags = [str(t).strip() for t in value if str(t).strip()]
             tags = [t if t.startswith("#") else f"#{t}" for t in tags]
             # A tag with a space in it is not a tag; Instagram cuts it at the
             # space and posts the remainder as plain text.
             tags = [t for t in tags if " " not in t][:4]
             if not tags:
-                return None
+                return None, ["לא היה אף האשטג שמיש ב-tags"]
             out[key] = tags
         else:
             if not isinstance(value, str) or not value.strip():
-                return None
-            value = value.strip()
-            if len(value) > _MAX_LEN[key]:
-                print(f"WARNING: '{key}' is {len(value)} chars, over the {_MAX_LEN[key]} ceiling",
-                      file=sys.stderr)
-                return None
-            out[key] = value
+                return None, [f"השדה {key} חסר או ריק"]
+            out[key] = value.strip()
+
+    hard = [f"השדה {k} הוא {len(out[k])} תווים, התקרה היא {_MAX_LEN[k]}"
+            for k in _MAX_LEN if len(out[k]) > _MAX_LEN[k]]
 
     if not _HEBREW.search(" ".join(out[k] for k in _COPY_KEYS if k != "tags")):
-        return None
+        return None, ["התשובה לא בעברית"]
 
     # The character ceiling above is the "ignored the brief entirely" tripwire.
     # The hook needs a tighter one of its own: it is the line that has to land
@@ -503,13 +698,38 @@ def _clean_copy(raw):
     # caption, the part Instagram shows collapsed in feed.
     hook_words = len(out["hook"].split())
     if hook_words > _HOOK_MAX_WORDS:
-        print(f"WARNING: hook is {hook_words} words, limit {_HOOK_MAX_WORDS}",
+        hard.append(f"ה-hook הוא {hook_words} מילים, המקסימום {_HOOK_MAX_WORDS}")
+
+    # The content gates live in copy_check.py: filler phrases, em-dashes,
+    # exclamation marks, a repeated opening word, sentence length, and a push
+    # toward a real number. Items 26, 33, 34, 35, 37 and 39.
+    extra_hard, soft = copy_check.check(out, recent_openings=recent_openings,
+                                        source_text=source_text)
+    hard += extra_hard
+
+    problems = hard + ([] if last_attempt else soft)
+    if problems:
+        return out, problems
+    if soft:
+        print("NOTE: shipping copy with a soft problem: " + "; ".join(soft),
               file=sys.stderr)
-        return None
-    return out
+    return out, []
 
 
-def write_post_copy(category, news=None, item=None):
+# Until 4.10.2026 there was exactly one attempt here, and anything the model
+# got wrong went straight to the template copy: a generic hook, a feed summary
+# cut at 430 characters, and a question nobody would answer. One bad JSON brace
+# cost a whole slot its post. Three attempts, each told what it broke.
+_COPY_ATTEMPTS = 3
+
+
+def write_post_copy(category, news=None, item=None, recent_openings=()):
+    """Hebrew copy from claude -p, with the gates applied before it is accepted.
+
+    Returns (copy, prompt): the prompt is kept so source.json can record the
+    exact text that produced the post (item 95), which is the only way a good
+    post can be reproduced rather than admired.
+    """
     if category == "concept":
         name, definition = item
         prompt = _CONCEPT_PROMPT.format(name=name, definition=definition)
@@ -522,24 +742,62 @@ def write_post_copy(category, news=None, item=None):
             title=news["title"],
             description=news.get("description") or "(אין תקציר בפיד)",
         )
-
-    try:
-        result = subprocess.run(
-            ["with-claude-token", "claude", "-p", prompt, "--output-format", "text"],
-            capture_output=True, text=True, timeout=COPY_TIMEOUT, check=True,
+    if recent_openings:
+        prompt += (
+            "\n\nהפוסטים האחרונים בעמוד כבר פתחו את ה-hook במילים האלה: "
+            + ", ".join(f'"{w}"' for w in recent_openings if w)
+            + ". אל תפתח באף אחת מהן. ארבעה פוסטים שמתחילים אותו דבר נראים "
+              "בגריד כמו פוסט אחד."
         )
-        text = result.stdout.strip()
-        # The model is asked for bare JSON but sometimes fences it.
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        parsed = _clean_copy(json.loads(match.group(0))) if match else None
-        if parsed:
-            return parsed
-        print(f"WARNING: unusable copy JSON for '{category}', using the template", file=sys.stderr)
-    except Exception as e:
-        print(f"WARNING: copy generation failed for '{category}' ({e}), using the template",
-              file=sys.stderr)
 
-    return _fallback_copy(category, news=news, item=item)
+    # What the model was actually given, so the attribution gate can tell an
+    # outlet that is in the source from one the model supplied itself.
+    source_text = (
+        f"{news['title']} {news.get('description') or ''} {news.get('url') or ''}"
+        if news else None
+    )
+
+    best, ask = None, prompt
+    for attempt in range(1, _COPY_ATTEMPTS + 1):
+        try:
+            result = subprocess.run(
+                ["with-claude-token", "claude", "-p", ask, "--output-format", "text"],
+                capture_output=True, text=True, timeout=COPY_TIMEOUT, check=True,
+            )
+            text = result.stdout.strip()
+            # The model is asked for bare JSON but sometimes fences it.
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            parsed, problems = _clean_copy(
+                json.loads(match.group(0)) if match else None,
+                recent_openings=recent_openings,
+                last_attempt=(attempt == _COPY_ATTEMPTS),
+                source_text=source_text,
+            )
+            if parsed and not problems:
+                return parsed, prompt
+            if parsed is not None:
+                best = parsed  # complete and usable, just not yet clean
+            print(f"WARNING: copy rejected for '{category}' on attempt {attempt}: "
+                  + "; ".join(problems), file=sys.stderr)
+            ask = prompt + (
+                "\n\nהתשובה הקודמת שלך נדחתה. תקן בדיוק את הבעיות האלה ואל תשנה "
+                "שום דבר אחר שעבד:\n- " + "\n- ".join(problems)
+                + "\n\nכל מגבלה שמופיעה למעלה היא מקסימום קשיח. לחתוך מילים, "
+                  "לא לחתוך את המספר או את הדוגמה."
+            )
+        except Exception as e:
+            print(f"WARNING: copy generation failed for '{category}' on attempt "
+                  f"{attempt} ({e})", file=sys.stderr)
+
+    # A complete answer that failed a style gate still beats the template copy,
+    # which fails more of them. The template is for when the model could not be
+    # reached at all.
+    if best is not None:
+        print(f"WARNING: shipping the last answer for '{category}' despite its "
+              f"problems, which still beats the template", file=sys.stderr)
+        return best, prompt
+    print(f"WARNING: falling back to the template copy for '{category}'", file=sys.stderr)
+    return _fallback_copy(category, news=news, item=item), prompt
 
 
 # Every caption names the destination. Until 3.10.2026 no post mentioned the
@@ -752,7 +1010,8 @@ def render_png(html_path: pathlib.Path, png_path: pathlib.Path):
 SLIDE_PLAN = ["hook", "explain", "takeaway"]
 
 
-def build_slot(slot_dir: pathlib.Path, category, copy):
+def build_slot(slot_dir: pathlib.Path, category, copy, news=None,
+               copy_prompt=None):
     slot_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         tmp = pathlib.Path(tmp)
@@ -763,10 +1022,23 @@ def build_slot(slot_dir: pathlib.Path, category, copy):
             render_png(html_path, slot_dir / f"post_{i}.png")
 
     (slot_dir / "caption.txt").write_text(make_caption(category, copy), encoding="utf-8")
+    record = {
+        "category": category,
+        "copy": copy,
+        # The English source was not recorded until 4.10.2026, so there was no
+        # way afterwards to tell which story a Hebrew post came from, or to
+        # check a claim against where it came from (item 99).
+        "news": news,
+        # Items 84 and 95: the rules this post ran under, and the exact prompt
+        # that produced it. Without them a week of numbers cannot say which
+        # change the week was testing, and a good post cannot be reproduced.
+        "backlog_items": BACKLOG_ITEMS,
+        "copy_prompt": copy_prompt,
+    }
     (slot_dir / "source.json").write_text(
-        json.dumps({"category": category, "copy": copy}, ensure_ascii=False, indent=1),
-        encoding="utf-8",
+        json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8",
     )
+    return record
 
 
 def main():
@@ -787,14 +1059,19 @@ def main():
 
     index = next_category_index()
     made, failed = 0, 0
+    # Read once, then kept current inside the loop: a run that queues three
+    # posts must not let post 3 repeat post 2's subject or its opening word.
+    recent = recent_posts()
 
     for slot in slots:
         category = CATEGORY_CYCLE[index % len(CATEGORY_CYCLE)]
         index += 1
+        openings = recent_openings(recent)
 
         news, item = None, None
         if category in ("news", "tool"):
-            news = pick_headline(headlines, seen_headlines)
+            news = pick_headline(headlines, seen_headlines,
+                                 subjects=recent_subjects(recent))
             if news is None:
                 # No usable story left in the feeds. Rather than lose the slot,
                 # fall back to material that is always available.
@@ -802,6 +1079,7 @@ def main():
                 item = pick_from_list(CONCEPTS, seen_terms)
             else:
                 seen_headlines.add(news["title"])
+                enrich(news)
         elif category == "concept":
             item = pick_from_list(CONCEPTS, seen_terms)
         else:
@@ -810,25 +1088,31 @@ def main():
         if item is not None:
             seen_terms.add(item[0])
 
-        copy = write_post_copy(category, news=news, item=item)
+        copy, copy_prompt = write_post_copy(category, news=news, item=item,
+                                            recent_openings=openings)
         name = slot.strftime("%Y-%m-%dT%H%M")
 
         if args.dry_run:
             preview = pathlib.Path(tempfile.mkdtemp(prefix="ai-he-preview-")) / name
             try:
-                build_slot(preview, category, copy)
+                build_slot(preview, category, copy, news=news,
+                           copy_prompt=copy_prompt)
             except Exception as e:
                 print(f"FAILED dry run ({category}): {e}", file=sys.stderr)
                 return 1
             print(f"[dry run] {category} rendered to {preview}")
+            print(json.dumps(copy, ensure_ascii=False, indent=1))
             return 0
 
         try:
-            build_slot(SCHEDULED / name, category, copy)
+            record = build_slot(SCHEDULED / name, category, copy, news=news,
+                                copy_prompt=copy_prompt)
         except Exception as e:
             print(f"FAILED {name} ({category}): {e}", file=sys.stderr)
             failed += 1
             continue
+        # Newest first, so the next slot in this run sees this post.
+        recent.insert(0, record)
         print(f"queued {name} ({category}): {copy['hook']}")
         made += 1
 
