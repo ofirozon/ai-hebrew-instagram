@@ -365,7 +365,7 @@ _NEWS_PROMPT = """אתה כותב עבור "בינה בקטנה", עמוד אי�
 "explain": 2 עד 3 משפטים, עד 300 תווים סך הכל, שמסבירים מה בעצם קרה ולמה זה משנה למישהו רגיל. מספרים ושמות אמיתיים, בלי מילות מילוי.
 "takeaway": משפט אחד, עד 80 תווים. מה לקחת מזה, או מה זה אומר על הכיוון שאליו הדברים הולכים. לא עצה גנרית.
 "question": שאלה אחת ספציפית לתגובות, עד 80 תווים. לא שאלה גנרית, היא חייבת להתאים רק לפוסט הזה.
-"tags": בדיוק 4 האשטגים עם הסולמית, בעברית או באנגלית, ספציפיים לנושא. בלי האשטג של שם העמוד.
+"tags": בדיוק 4 האשטגים עם הסולמית. בחר רק תגיות שבן אדם באמת גולש בהן, כלומר תגיה רחבה שיש בה תוכן (למשל #בינהמלאכותית, #ChatGPT, #טכנולוגיה) או שם הכלי שעליו הפוסט. בלי תגיות מומצאות ובלי צירופים ארוכים שאף אחד לא מחפש, בלי קו תחתון, ובלי האשטג של שם העמוד. בחר רק תגיות שבן אדם באמת גולש בהן, כלומר תגיה רחבה שיש בה תוכן (למשל #בינהמלאכותית, #ChatGPT, #טכנולוגיה) או שם הכלי שעליו הפוסט. בלי תגיות מומצאות ובלי צירופים ארוכים שאף אחד לא מחפש, בלי קו תחתון, ובלי האשטג של שם העמוד.
 
 כללים: עברית תקנית וזורמת, לא תרגומית. בלי סלנג של מתכנתים. מונח באנגלית מותר רק אם אין לו שם עברי מקובל, ואז מסבירים אותו בשלוש מילים במקום. בלי הבטחות, בלי "ישנה את העולם", בלי סימני קריאה."""
 
@@ -384,7 +384,7 @@ _TOOL_PROMPT = """אתה כותב עבור "בינה בקטנה", עמוד אי�
 "explain": 2 עד 3 משפטים, עד 300 תווים, מה הוא עושה בפועל ומתי שווה לפתוח אותו. אם ידוע אם הוא חינמי, אמור את זה.
 "takeaway": משפט אחד, עד 80 תווים, מתי להשתמש בו ומתי לא.
 "question": שאלה ספציפית לתגובות, עד 80 תווים.
-"tags": בדיוק 4 האשטגים עם הסולמית.
+"tags": בדיוק 4 האשטגים עם הסולמית. בחר רק תגיות שבן אדם באמת גולש בהן, כלומר תגיה רחבה שיש בה תוכן (למשל #בינהמלאכותית, #ChatGPT, #טכנולוגיה) או שם הכלי שעליו הפוסט. בלי תגיות מומצאות ובלי צירופים ארוכים שאף אחד לא מחפש, בלי קו תחתון, ובלי האשטג של שם העמוד.
 
 כללים: עברית זורמת, בלי שפה שיווקית, בלי "מהפכני". אם אתה לא בטוח בעובדה, אל תכתוב אותה."""
 
@@ -401,7 +401,7 @@ _CONCEPT_PROMPT = """אתה כותב עבור "בינה בקטנה", עמוד א
 "explain": 2 עד 3 משפטים, עד 300 תווים, שמסבירים אותו דרך דוגמה קונקרטית אחת עם מספרים או מקרה אמיתי. עדיף "שיחה של 200 עמודים נכנסת בחלון של מודל היום" על פני הגדרה מופשטת.
 "takeaway": משפט אחד, עד 80 תווים, מה זה אומר לך בפועל כשאתה נתקל בזה.
 "question": שאלה שמכריחה מישהו ליישם את המושג, עד 80 תווים.
-"tags": בדיוק 4 האשטגים עם הסולמית.
+"tags": בדיוק 4 האשטגים עם הסולמית. בחר רק תגיות שבן אדם באמת גולש בהן, כלומר תגיה רחבה שיש בה תוכן (למשל #בינהמלאכותית, #ChatGPT, #טכנולוגיה) או שם הכלי שעליו הפוסט. בלי תגיות מומצאות ובלי צירופים ארוכים שאף אחד לא מחפש, בלי קו תחתון, ובלי האשטג של שם העמוד.
 
 כללים: עברית זורמת, בלי ז'רגון, בלי סימני קריאה."""
 
@@ -418,7 +418,7 @@ _PROMPT_PROMPT = """אתה כותב עבור "בינה בקטנה", עמוד א�
 "explain": 2 עד 3 משפטים, עד 300 תווים, שכוללים ניסוח לדוגמה שאפשר להעתיק מילה במילה.
 "takeaway": משפט אחד, עד 80 תווים, מתי זה הכי עוזר.
 "question": שאלה ספציפית לתגובות, עד 80 תווים.
-"tags": בדיוק 4 האשטגים עם הסולמית.
+"tags": בדיוק 4 האשטגים עם הסולמית. בחר רק תגיות שבן אדם באמת גולש בהן, כלומר תגיה רחבה שיש בה תוכן (למשל #בינהמלאכותית, #ChatGPT, #טכנולוגיה) או שם הכלי שעליו הפוסט. בלי תגיות מומצאות ובלי צירופים ארוכים שאף אחד לא מחפש, בלי קו תחתון, ובלי האשטג של שם העמוד.
 
 כללים: עברית זורמת. הדוגמה חייבת להיות משהו שאפשר להדביק כמו שהוא, לא תיאור של דוגמה."""
 
@@ -543,16 +543,30 @@ def make_caption(category, copy):
     # The model sometimes returns the brand tag itself, spelled with
     # underscores (#בינה_בקטנה), which shipped next to our own #בינהבקטנה and
     # read as a typo. Compare tags ignoring underscores and keep the first.
-    tags, seen_tags = [], set()
+    #
+    # Underscores are also stripped from the tags themselves, not only from the
+    # comparison. On Instagram #בינה_מלאכותית and #בינהמלאכותית are two
+    # different tags, and the model picked whichever it felt like per post, so
+    # the account's own posts were split across two spellings of the same
+    # subject. The no-underscore spelling is the one in common use in Hebrew
+    # Instagram, so that is the one we settle on.
+    #
+    # Capped at 5. Long hashtag blocks stopped buying reach years ago and read
+    # as spam to a human scanning the caption.
+    tags, seen_tags = [], []
     for t in ["#בינהבקטנה", *copy["tags"]]:
-        key = t.replace("_", "").lower()
+        t = t.replace("_", "")
+        key = t.lower()
         if key in seen_tags:
             continue
-        seen_tags.add(key)
+        seen_tags.append(key)
         tags.append(t)
-    tags = " ".join(tags)
+    tags = " ".join(tags[:5])
+    # The hook leads. The category label used to be the first line, which is
+    # the line Instagram shows collapsed in feed and indexes for search, spent
+    # on a word that tells the reader nothing. It already appears as the eyebrow
+    # on the card, so it moves down next to the hashtags.
     return (
-        f"{tag}\n\n"
         f"{copy['hook']}\n\n"
         f"{copy['headline']}\n\n"
         f"{copy['concept']}\n"
@@ -560,6 +574,7 @@ def make_caption(category, copy):
         f"{copy['takeaway']}\n\n"
         f"{copy['question']}\n\n"
         f"{CHANNEL_CTA}\n\n"
+        f"{tag}\n"
         f"{tags}"
     )
 
