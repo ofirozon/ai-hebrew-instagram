@@ -1,6 +1,8 @@
 [
+ "RAG",
  "הזיה (Hallucination)",
  "חלון הקשר (Context Window)",
+ "טוקן (Token)",
  "פרומפט מערכת (System Prompt)",
  "תגיד באיזה פורמט",
  "תגיד מה לא לעשות",
