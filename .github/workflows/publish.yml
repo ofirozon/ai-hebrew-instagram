@@ -39,6 +39,13 @@ jobs:
         run: python3 publish.py
 
       - name: Commit moved files
+        # always(): publish.py exits 1 whenever any slot fails or is rejected,
+        # and skipping this step then threw away the rejected/ move and any
+        # published-log.jsonl entry from the same run. On the stock repo
+        # (17.10.2026) that left a rejected slot failing every run, and set up
+        # the next post to be republished every 10 minutes, since MIN_GAP
+        # reads that log.
+        if: always()
         run: |
           git config user.name "ai-hebrew-bot"
           git config user.email "actions@users.noreply.github.com"
