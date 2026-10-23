@@ -26,6 +26,7 @@ import argparse
 import json
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1187,11 +1188,18 @@ def main():
             print(json.dumps(copy, ensure_ascii=False, indent=1))
             return 0
 
+        slot_dir = SCHEDULED / name
+        fresh = not slot_dir.exists()
         try:
-            record = build_slot(SCHEDULED / name, category, copy, news=news,
+            record = build_slot(slot_dir, category, copy, news=news,
                                 copy_prompt=copy_prompt)
         except Exception as e:
             print(f"FAILED {name} ({category}): {e}", file=sys.stderr)
+            # A half-rendered folder (one card, no caption) used to get pushed
+            # by the queue script's `git add -A` and failed every publish run
+            # for a day (22.10.2026). Drop what this attempt created.
+            if fresh:
+                shutil.rmtree(slot_dir, ignore_errors=True)
             failed += 1
             continue
         # Newest first, so the next slot in this run sees this post.
