@@ -64,7 +64,7 @@ COPY_TIMEOUT = 180
 # what says which change the week was testing. Update it when the generator's
 # rules change, not when the code is merely refactored.
 BACKLOG_ITEMS = [6, 7, 8, 9, 15, 18, 21, 22, 23, 24, 25, 26, 27, 28, 29, 32,
-                 33, 34, 35, 36, 37, 38, 39, 84, 95, 99]
+                 33, 34, 35, 36, 37, 38, 39, 76, 84, 95, 99]
 
 # Hebrew AI coverage is thin and slow, so the feeds are English and the model
 # writes the Hebrew. Keep these general-audience: a paper-of-the-day feed
@@ -808,8 +808,57 @@ def write_post_copy(category, news=None, item=None, recent_openings=()):
 # the habit worth training.
 CHANNEL_CTA = "📲 עוד כלים וחדשות AI בעברית, כל יום בערוץ בינה בקטנה. הלינק בביו."
 
+# Item 76, 27.10.2026: point to the channel by what is in it this week, not by
+# its name. "Every day in the channel" is a promise a scroller has no reason to
+# test; a concrete question the channel answered this week is. The question is
+# lifted verbatim from the opening line of a post the channel actually
+# published in the last 7 days, never written by the model, so the caption
+# cannot advertise something the channel does not contain. Posts that open on
+# a statement are skipped, and so are questions too short to stand alone or
+# too long for one caption line. The account writes for people who do not work
+# in tech, so questions without Latin script (no Claude Code tips) are
+# preferred, and the pick rotates by slot so consecutive posts differ. With
+# nothing usable (repo missing, channel quiet for a week) the generic line
+# stays.
+CHANNEL_PUBLISHED = (pathlib.Path.home() / "goal cowwork" / "channel-scheduler"
+                     / "published" / "he")
+_TEASER_MIN, _TEASER_MAX = 25, 80
 
-def make_caption(category, copy):
+
+def channel_teasers(now=None, days=7):
+    now = now or datetime.now(timezone.utc)
+    found = []
+    if not CHANNEL_PUBLISHED.is_dir():
+        return found
+    for f in sorted(CHANNEL_PUBLISHED.glob("*.txt"), reverse=True):
+        when = slot_time_from_name(f.stem)
+        if when is None or when > now or now - when > timedelta(days=days):
+            continue
+        try:
+            first = f.read_text(encoding="utf-8").splitlines()[0]
+        except (OSError, IndexError, UnicodeDecodeError):
+            continue
+        first = re.sub(r"^[^\w\"]+", "", first).strip()
+        m = re.match(r"(.+?\?)(?:\s|$)", first)
+        if not m:
+            continue
+        q = m.group(1).strip()
+        if _TEASER_MIN <= len(q) <= _TEASER_MAX and "\n" not in q:
+            found.append(q)
+    plain = [q for q in found if not re.search(r"[A-Za-z]", q)]
+    return plain or found
+
+
+def channel_cta(slot=None):
+    teasers = channel_teasers()
+    if not teasers:
+        return CHANNEL_CTA
+    key = slot.toordinal() * 24 + slot.hour if slot is not None else 0
+    q = teasers[key % len(teasers)]
+    return f"📲 השבוע בערוץ בינה בקטנה: {q} התשובה שם, הלינק בביו."
+
+
+def make_caption(category, copy, slot=None):
     tag = CATEGORY_META[category]["tag"]
     # The model sometimes returns the brand tag itself, spelled with
     # underscores (#בינה_בקטנה), which shipped next to our own #בינהבקטנה and
@@ -844,7 +893,7 @@ def make_caption(category, copy):
         f"{copy['explain']}\n\n"
         f"{copy['takeaway']}\n\n"
         f"{copy['question']}\n\n"
-        f"{CHANNEL_CTA}\n\n"
+        f"{channel_cta(slot)}\n\n"
         f"{tag}\n"
         f"{tags}"
     )
@@ -1064,7 +1113,9 @@ def build_slot(slot_dir: pathlib.Path, category, copy, news=None,
             html_path.write_text(html, encoding="utf-8")
             render_png(html_path, slot_dir / f"post_{i}.png")
 
-    (slot_dir / "caption.txt").write_text(make_caption(category, copy), encoding="utf-8")
+    (slot_dir / "caption.txt").write_text(
+        make_caption(category, copy, slot_time_from_name(slot_dir.name)),
+        encoding="utf-8")
     record = {
         "category": category,
         "copy": copy,
@@ -1109,7 +1160,8 @@ def rebuild_slot(slot_dir: pathlib.Path):
             render_png(html_path, slot_dir / f"post_{i}.png")
 
     (slot_dir / "caption.txt").write_text(
-        make_caption(category, copy), encoding="utf-8")
+        make_caption(category, copy, slot_time_from_name(slot_dir.name)),
+        encoding="utf-8")
     print(f"Rebuilt {slot_dir.name} [{category}]: {len(SLIDE_PLAN)} slides")
 
 
