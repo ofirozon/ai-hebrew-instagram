@@ -776,7 +776,9 @@ def write_post_copy(category, news=None, item=None, recent_openings=()):
             )
             if parsed and not problems:
                 return parsed, prompt
-            if parsed is not None:
+            # Item 99: an answer with a number the source never had is not a
+            # usable fallback. A style slip can ship; an invented figure cannot.
+            if parsed is not None and not copy_check.unsourced_figures(parsed, source_text):
                 best = parsed  # complete and usable, just not yet clean
             print(f"WARNING: copy rejected for '{category}' on attempt {attempt}: "
                   + "; ".join(problems), file=sys.stderr)

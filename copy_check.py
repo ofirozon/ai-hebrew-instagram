@@ -19,6 +19,7 @@ Two kinds of problem:
 
 Items 26, 33, 34, 35, 37 and 39 of instagram-backlog.md.
 """
+import datetime
 import re
 
 # Item 35, in Hebrew. Every one of these is a phrase a model reaches for when
@@ -166,6 +167,97 @@ def unsourced_outlets(text, source_text):
     return found
 
 
+# Item 98, ported from the stock account 29.10.2026. A five-digit number with
+# no thousands separator ("12000000") has to be counted digit by digit, and on
+# a card the reader gives it one glance. Hebrew uses the same comma.
+_UNSEPARATED = re.compile(r"(?<![\d.,])([$₪]\d{4,}|\d{5,})(?![\d,]|\.\d)")
+
+
+def unseparated_numbers(text):
+    return _UNSEPARATED.findall(text or "")
+
+
+# Item 99, the figure half, ported 29.10.2026. The outlet check above catches
+# an invented source; this catches an invented number. Every figure on the
+# three slides has to be in the English headline or summary the model was
+# given, magnitudes applied either way ("$40B" == "40 מיליארד"), unless the
+# sentence is plainly a hypothetical or dated two or more years back. The stock
+# account only checks sentences that name the story's subject; here the copy is
+# Hebrew and the headline English, so that test is unavailable, and the check
+# covers every sentence. Run over all 41 news posts published to 28.10.2026,
+# the only false alarms were "three" spelled out in the source, hence the words.
+_MAGNITUDE = {"thousand": 1e3, "k": 1e3, "million": 1e6, "m": 1e6, "mn": 1e6,
+              "billion": 1e9, "b": 1e9, "bn": 1e9, "trillion": 1e12, "t": 1e12,
+              "אלף": 1e3, "אלפים": 1e3, "אלפי": 1e3, "מיליון": 1e6, "מיליוני": 1e6,
+              "מיליארד": 1e9, "מיליארדי": 1e9, "טריליון": 1e12}
+_FIGURE = re.compile(
+    r"(\d[\d,]*(?:\.\d+)?)\s*(%|percent\b|אחוזים|אחוז|thousand\b|million\b|"
+    r"billion\b|trillion\b|bn\b|mn\b|[kmbt]\b|אלפים|אלפי|אלף|מיליוני|מיליון|"
+    r"מיליארדי|מיליארד|טריליון)?", re.IGNORECASE)
+_ENGLISH_NUMBERS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "dozen": 12,
+    "fifteen": 15, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "hundred": 100,
+}
+_HYPOTHETICAL_HE = re.compile(r"(?:^|\s)(אם|נניח|לדוגמה|למשל|דמיינו|תדמיינו|כאילו)\s")
+_YEAR = re.compile(r"(?<!\d)(19\d\d|20\d\d)(?!\d)")
+
+
+def _figures(text):
+    out = set()
+    for num, unit in _FIGURE.findall(text or ""):
+        try:
+            value = float(num.replace(",", ""))
+        except ValueError:
+            continue
+        unit = (unit or "").lower()
+        if unit in ("%", "percent", "אחוז", "אחוזים"):
+            out.add(("pct", value))
+        else:
+            out.add(("n", value * _MAGNITUDE.get(unit, 1)))
+    return out
+
+
+def unsourced_figures(copy, source_text, year=None):
+    """[(field, sentence, figure)] for numbers on the slides the source never had."""
+    if not source_text:
+        return []
+    known = _figures(source_text)
+    low = source_text.lower()
+    known |= {("n", float(v)) for w, v in _ENGLISH_NUMBERS.items()
+              if re.search(rf"\b{w}\b", low)}
+    found = []
+    for key in ("hook", "explain", "takeaway"):
+        for sentence in re.split(r"(?<=[.?!])\s+", copy.get(key, "") or ""):
+            if _HYPOTHETICAL_HE.search(f" {sentence}"):
+                continue
+            years = [int(y) for y in _YEAR.findall(sentence)]
+            if year and any(y <= year - 2 for y in years):
+                continue
+            for kind, value in _figures(sentence):
+                if kind == "n" and 1900 <= value <= 2100 and value == int(value):
+                    continue  # a year, not a figure
+                if (kind, value) not in known:
+                    shown = f"{value:g}%" if kind == "pct" else (
+                        f"{value:,.0f}" if value == int(value) else f"{value:g}")
+                    found.append((key, sentence.strip(), shown))
+    return found
+
+
+def figure_problems(copy, source_text, year=None):
+    return [
+        f"בשדה {key} מופיע המספר {fig} (\"{sentence[:70]}\"), והוא לא מופיע "
+        f"בכותרת או בתקציר. אסור להמציא מספר על הסיפור. להוריד אותו או להחליף "
+        f"במספר שכתוב במקור"
+        for key, sentence, fig in unsourced_figures(copy, source_text, year)
+    ]
+
+
+def _this_year():
+    return datetime.date.today().year
+
+
 def check(copy, recent_openings=(), source_text=None):
     """Every rule, over a finished copy dict.
 
@@ -196,6 +288,15 @@ def check(copy, recent_openings=(), source_text=None):
                 f"בחומר המקור. אסור לייחס לגוף תקשורת שלא כתוב במקור. אם לא "
                 f"ברור מי פרסם, לא מזכירים אף גוף"
             )
+
+        bad = unseparated_numbers(text)
+        if bad:
+            hard.append(
+                f"בשדה {key} כתוב {bad[0]} בלי פסיק של אלפים. לכתוב עם פסיקים "
+                f"(12,000,000) או במילים (12 מיליון)"
+            )
+
+    hard += figure_problems(copy, source_text, year=_this_year())
 
     # Item 26, and the one place this file deliberately differs from the stock
     # account's. There, a number is a hard requirement: a market story always
