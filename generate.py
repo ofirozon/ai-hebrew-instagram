@@ -64,7 +64,7 @@ COPY_TIMEOUT = 180
 # what says which change the week was testing. Update it when the generator's
 # rules change, not when the code is merely refactored.
 BACKLOG_ITEMS = [6, 7, 8, 9, 15, 18, 21, 22, 23, 24, 25, 26, 27, 28, 29, 32,
-                 33, 34, 35, 36, 37, 38, 39, 76, 84, 95, 99]
+                 33, 34, 35, 36, 37, 38, 39, 76, 84, 95, 96, 99, 13]
 
 # Hebrew AI coverage is thin and slow, so the feeds are English and the model
 # writes the Hebrew. Keep these general-audience: a paper-of-the-day feed
@@ -653,7 +653,8 @@ _MAX_LEN = {"hook": 130, "headline": 150, "concept": 60,
             "explain": 430, "takeaway": 130, "question": 120}
 
 
-def _clean_copy(raw, recent_openings=(), last_attempt=False, source_text=None):
+def _clean_copy(raw, recent_openings=(), last_attempt=False, source_text=None,
+                question_hook=False, question_type=None):
     """Accept the model's JSON only if every field is usable AND in Hebrew.
 
     Returns (copy, problems). A copy of None means nothing usable came back. A
@@ -705,7 +706,9 @@ def _clean_copy(raw, recent_openings=(), last_attempt=False, source_text=None):
     # exclamation marks, a repeated opening word, sentence length, and a push
     # toward a real number. Items 26, 33, 34, 35, 37 and 39.
     extra_hard, soft = copy_check.check(out, recent_openings=recent_openings,
-                                        source_text=source_text)
+                                        source_text=source_text,
+                                        question_hook=question_hook,
+                                        question_type=question_type)
     hard += extra_hard
 
     problems = hard + ([] if last_attempt else soft)
@@ -724,7 +727,20 @@ def _clean_copy(raw, recent_openings=(), last_attempt=False, source_text=None):
 _COPY_ATTEMPTS = 3
 
 
-def write_post_copy(category, news=None, item=None, recent_openings=()):
+# Item 13, ported 30.10.2026. The Wednesday 17:00 carousel opens on a question
+# the reader answers from their own life in a few words. Gated in
+# copy_check.question_hook_problems, not only asked for.
+QUESTION_HOOK_PROMPT = """
+
+הפוסט הזה הוא פוסט השאלה של השבוע, וזה גובר על כלל ה-hook שלמעלה. ה-hook הוא שאלה לקורא, בגוף שני, שמישהו שלא מבין כלום ב-AI יכול לענות עליה בתגובות במילים ספורות מהחיים שלו: הבחירה שלו, הניחוש שלו או החוויה שלו. "היית נותן ל-AI לקרוא לך את המיילים?" עובד. "למה ChatGPT ממציא מספרים?" לא עובד, כי הוא שואל על ידע ואף אחד לא כותב ידע בתגובות. השאלה עדיין חייבת להיות על הסיפור הזה, עד 8 מילים, ולהסתיים בסימן שאלה. ה-explain נותן את התשובה שהסיפור מציע."""
+
+
+def wants_question_hook(slot):
+    return slot is not None and slot.weekday() == 2 and slot.hour >= 15
+
+
+def write_post_copy(category, news=None, item=None, recent_openings=(),
+                    slot=None):
     """Hebrew copy from claude -p, with the gates applied before it is accepted.
 
     Returns (copy, prompt): the prompt is kept so source.json can record the
@@ -750,6 +766,15 @@ def write_post_copy(category, news=None, item=None, recent_openings=()):
             + ". אל תפתח באף אחת מהן. ארבעה פוסטים שמתחילים אותו דבר נראים "
               "בגריד כמו פוסט אחד."
         )
+    question_hook = wants_question_hook(slot)
+    question_type = copy_check.question_type_for(slot)
+    if question_hook:
+        prompt += QUESTION_HOOK_PROMPT
+    if question_type:
+        # Item 96: the comment question rotates through fixed types by slot.
+        prompt += ("\n\nבפוסט הזה שדה ה-question חייב להיות "
+                   + copy_check.QUESTION_TYPES[question_type][0]
+                   + ". כל שאר הכללים לשאלה עדיין חלים.")
 
     # What the model was actually given, so the attribution gate can tell an
     # outlet that is in the source from one the model supplied itself.
@@ -773,6 +798,8 @@ def write_post_copy(category, news=None, item=None, recent_openings=()):
                 recent_openings=recent_openings,
                 last_attempt=(attempt == _COPY_ATTEMPTS),
                 source_text=source_text,
+                question_hook=question_hook,
+                question_type=question_type,
             )
             if parsed and not problems:
                 return parsed, prompt
@@ -1107,6 +1134,7 @@ SLIDE_PLAN = ["hook", "explain", "takeaway"]
 def build_slot(slot_dir: pathlib.Path, category, copy, news=None,
                copy_prompt=None):
     slot_dir.mkdir(parents=True, exist_ok=True)
+    slot = slot_time_from_name(slot_dir.name)
     with tempfile.TemporaryDirectory() as tmp:
         tmp = pathlib.Path(tmp)
         for i, kind in enumerate(SLIDE_PLAN, start=1):
@@ -1130,6 +1158,8 @@ def build_slot(slot_dir: pathlib.Path, category, copy, news=None,
         # change the week was testing, and a good post cannot be reproduced.
         "backlog_items": BACKLOG_ITEMS,
         "copy_prompt": copy_prompt,
+        "question_type": copy_check.question_type_for(slot),
+        "variant": "question-hook" if wants_question_hook(slot) else None,
     }
     (slot_dir / "source.json").write_text(
         json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8",
@@ -1227,7 +1257,7 @@ def main():
             seen_terms.add(item[0])
 
         copy, copy_prompt = write_post_copy(category, news=news, item=item,
-                                            recent_openings=openings)
+                                            recent_openings=openings, slot=slot)
         name = slot.strftime("%Y-%m-%dT%H%M")
 
         if args.dry_run:

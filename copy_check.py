@@ -258,7 +258,96 @@ def _this_year():
     return datetime.date.today().year
 
 
-def check(copy, recent_openings=(), source_text=None):
+# Items 13 and 96, ported from the stock account on 30.10.2026.
+#
+# Item 96. Left to itself the comment question collapses into one shape. On
+# this account it is the hypothetical: six of the sixteen questions queued or
+# published 25.10 to 1.11 were "אם היית..." or "היית...". The type rotates by
+# slot now, and each type has a shape the code can check.
+#
+# Hebrew marks the reader in the verb, so "addressed to the reader" cannot be
+# a pronoun test the way it is in English. The checks below are on the
+# opening words instead, which is where each type shows itself.
+_HYPOTHETICAL = re.compile(r"(?:^|\s)(?:אם\s+)?היית(?:\s|$)|^אם\s")
+QUESTION_TYPES = {
+    "choice": ("שאלת בחירה: שתי אפשרויות שהקורא בוחר ביניהן, ושתיהן כתובות "
+               "בשאלה ומחוברות ב\"או\"", None),
+    "experience": ("שאלה על משהו שהקורא כבר עשה או עבר, בזמן עבר, שנפתחת "
+                   "ב\"פעם\", \"מתי בפעם האחרונה\", \"יצא לך\", \"קרה לך\", "
+                   "\"כבר\" או \"מה הדבר האחרון\"",
+                   ("פעם ", "מתי בפעם האחרונה", "מתי פעם אחרונה", "יצא לך",
+                    "קרה לך", "כבר ", "מה הדבר האחרון", "מה הפעם האחרונה",
+                    "ניסית", "השתמשת", "קיבלת")),
+    "habit": ("שאלה על מה שהקורא עושה היום, בזמן הווה, שנפתחת ב\"אתה\", "
+              "\"איך אתה\", \"באיזה\", \"באיזו תדירות\" או \"על מה אתה\"",
+              ("אתה ", "איך אתה", "מה אתה", "על מה אתה", "במה אתה", "באיזה",
+               "באיזו", "לאיזה", "לאיזו", "כמה פעמים", "איפה אתה", "מתי אתה")),
+    "number": ("שאלה על מספר מהחיים של הקורא, שנפתחת ב\"כמה\" או "
+               "\"באיזה גיל\", אף פעם לא ניחוש על מחיר או על שוק",
+               ("כמה ", "באיזה גיל")),
+}
+QUESTION_TYPE_ORDER = ("choice", "experience", "habit", "number")
+
+
+def question_type_for(slot):
+    if slot is None:
+        return None
+    return QUESTION_TYPE_ORDER[(slot.toordinal() + (slot.hour >= 15)) % len(QUESTION_TYPE_ORDER)]
+
+
+def question_type_problems(question, qtype):
+    if not qtype or qtype not in QUESTION_TYPES:
+        return []
+    q = question.strip().strip("\"'")
+    desc, openers = QUESTION_TYPES[qtype]
+    problems = []
+    if not q.endswith("?"):
+        problems.append("ה-question חייבת להסתיים בסימן שאלה")
+    if qtype == "choice":
+        if not re.search(r"(?:^|\s)או(?:\s|$)", q):
+            problems.append(f"ה-question בפוסט הזה היא {desc}")
+    else:
+        if not q.startswith(openers):
+            problems.append(f"ה-question בפוסט הזה היא {desc}")
+        if _HYPOTHETICAL.search(q):
+            problems.append("ה-question בפוסט הזה לא היפותטית: בלי \"אם\" ובלי "
+                            "\"היית\", שאלה על מה שהקורא עשה או עושה באמת")
+    return problems
+
+
+# Item 13. One carousel a week opens on a question to the reader instead of a
+# statement. A comment from someone who does not follow the account is the
+# cheapest real engagement signal there is, and a statement gives nobody a
+# reason to type. A "why" or "what is" question is a question too, but nobody
+# answers it in the comments: it asks for knowledge.
+_KNOWLEDGE_OPENERS = ("למה ", "מה זה ", "מה ההבדל", "איך עובד", "איך עובדת",
+                      "איך זה עובד", "מהו ", "מהי ", "מי המציא")
+# Second person as a whole word. Hebrew marks the reader in the verb, so the
+# list carries the past-tense verbs a reader question tends to open on. Crude
+# on purpose: it only has to tell "you" from a headline about a company.
+_TO_THE_READER = re.compile(
+    r"(?:^|\s)(?:אתה|לך|שלך|אותך|בשבילך|ממך|עליך|בך|היית|תהיה|ניסית|"
+    r"השתמשת|קיבלת|נתת|שלחת|סומך|מוכן|יודע)(?=[\s?,.]|$)"
+)
+
+
+def question_hook_problems(hook):
+    hook = hook.strip()
+    problems = []
+    if not hook.endswith("?"):
+        problems.append("זה פוסט השאלה של השבוע: ה-hook חייב להיות שאלה שמסתיימת "
+                        "בסימן שאלה")
+    if not _TO_THE_READER.search(hook):
+        problems.append("ה-hook של פוסט השאלה חייב לפנות לקורא בגוף שני (אתה, לך, "
+                        "שלך, היית, ניסית)")
+    if hook.startswith(_KNOWLEDGE_OPENERS):
+        problems.append("ה-hook של פוסט השאלה שואל על ידע. לשאול על הבחירה, הניחוש "
+                        "או החוויה של הקורא עצמו")
+    return problems
+
+
+def check(copy, recent_openings=(), source_text=None, question_hook=False,
+          question_type=None):
     """Every rule, over a finished copy dict.
 
     Returns (hard, soft): two lists of problems, in Hebrew, written to be
@@ -322,6 +411,10 @@ def check(copy, recent_openings=(), source_text=None):
             f"ה-hook נפתח ב\"{opening}\", מילה שהפוסטים האחרונים כבר פתחו בה. "
             f"לפתוח במילה אחרת"
         )
+
+    if question_hook:
+        hard += question_hook_problems(copy.get("hook", ""))
+    hard += question_type_problems(copy.get("question", ""), question_type)
 
     # Item 33, soft.
     lengths = sentence_lengths(copy.get("explain", ""))
