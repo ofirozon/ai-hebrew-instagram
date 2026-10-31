@@ -878,6 +878,20 @@ def channel_teasers(now=None, days=7):
     return plain or found
 
 
+# Item 16, ported from the stock account 31.10.2026. One post in five asks for
+# the follow and says what following gets you. Every post would read as needy;
+# never asking leaves the one action that compounds unasked. Keyed on the slot
+# time so a rebuild gives the same answer, counted in half-days (10:00 and
+# 17:00 UTC are the two slots) so it lands on one slot in five.
+FOLLOW_CTA = "👋 חדשים פה? עקבו אחרי @ai_il_core: AI בעברית, כל יום ובלי ז'רגון."
+
+
+def wants_follow_line(slot):
+    if slot is None:
+        return False
+    return (slot.toordinal() * 2 + (slot.hour >= 15)) % 5 == 0
+
+
 def channel_cta(slot=None):
     teasers = channel_teasers()
     if not teasers:
@@ -889,6 +903,7 @@ def channel_cta(slot=None):
 
 def make_caption(category, copy, slot=None):
     tag = CATEGORY_META[category]["tag"]
+    follow_line = f"{FOLLOW_CTA}\n" if wants_follow_line(slot) else ""
     # The model sometimes returns the brand tag itself, spelled with
     # underscores (#בינה_בקטנה), which shipped next to our own #בינהבקטנה and
     # read as a typo. Compare tags ignoring underscores and keep the first.
@@ -922,6 +937,7 @@ def make_caption(category, copy, slot=None):
         f"{copy['explain']}\n\n"
         f"{copy['takeaway']}\n\n"
         f"{copy['question']}\n\n"
+        f"{follow_line}"
         f"{channel_cta(slot)}\n\n"
         f"{tag}\n"
         f"{tags}"
@@ -1049,7 +1065,12 @@ def _fit(text, steps):
     return steps[-1][1]
 
 
-_HOOK_STEPS = [(45, 62), (70, 54), (95, 46), (130, 40)]
+# Item 42, 31.10.2026: raised from 62/54/46/40. Most impressions are a
+# thumbnail about 150px wide, where 62px came out under 9px tall. Hooks run 30
+# to 50 characters, so the top three tiers do the work; checked against the
+# worst case (45 characters at 92px with a 140-character source line), which
+# still clears the footer.
+_HOOK_STEPS = [(35, 100), (45, 92), (55, 84), (70, 72), (95, 58), (130, 46)]
 # Retuned 4.10.2026 alongside the panel. These were sized for weight-900 text
 # sitting directly on the background, where a large size was the only thing
 # giving the slide any presence. Inside the panel, at weight 400 with a 1.8
