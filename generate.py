@@ -727,6 +727,35 @@ def _clean_copy(raw, recent_openings=(), last_attempt=False, source_text=None,
 _COPY_ATTEMPTS = 3
 
 
+# Item 40, ported 1.11.2026. Once the copy passes every other gate, a second
+# model call reads the slides as a cold Israeli scroller who does not work in
+# tech (the reader this account writes for) and says whether they would send
+# the post to a friend. A "no" costs exactly one rewrite with the reason
+# attached. A judge that cannot be reached or answers garbage lets the post
+# through: this is a quality nudge, not a reason to fall back to the template.
+_SEND_CHECK_PROMPT = """You are a 30-year-old Israeli who does not work in tech, scrolling Instagram. A Hebrew carousel from an account you do not follow shows you these three slides:
+
+1. {hook} (under it, smaller: {headline})
+2. {concept}: {explain}
+3. {takeaway} (under it, smaller: {question})
+
+Would you send this post to a friend on WhatsApp? Be honest and strict: most posts do not get sent. Say yes only if it contains something specific you would want to show someone: a surprising fact, a tool or trick you would actually try, a line you would repeat. A post that is correct but generic, or that only makes sense to people in tech, is a no.
+
+Return ONLY a JSON object: {{"send": true or false, "reason": "one sentence in Hebrew: what is missing, or what made it worth sending"}}"""
+
+
+def send_check(copy):
+    """(verdict, reason). verdict is None when the judge could not answer."""
+    try:
+        data = _llm_json(_SEND_CHECK_PROMPT.format(
+            **{k: copy.get(k, "") for k in
+               ("hook", "headline", "concept", "explain", "takeaway", "question")}))
+        return bool(data["send"]), str(data.get("reason", "")).strip()
+    except Exception as e:
+        print(f"WARNING: send check unavailable ({e}), shipping without it", file=sys.stderr)
+        return None, ""
+
+
 # Item 13, ported 30.10.2026. The Wednesday 17:00 carousel opens on a question
 # the reader answers from their own life in a few words. Gated in
 # copy_check.question_hook_problems, not only asked for.
@@ -783,7 +812,7 @@ def write_post_copy(category, news=None, item=None, recent_openings=(),
         if news else None
     )
 
-    best, ask = None, prompt
+    best, ask, send_checked = None, prompt, False
     for attempt in range(1, _COPY_ATTEMPTS + 1):
         try:
             result = subprocess.run(
@@ -801,6 +830,20 @@ def write_post_copy(category, news=None, item=None, recent_openings=(),
                 question_hook=question_hook,
                 question_type=question_type,
             )
+            # Judged on the first complete answer even if a gate also failed
+            # it: a soft gate (no number in a story that has none) can hold
+            # every attempt but the last, and the last is never judged, so
+            # waiting for a clean answer left those posts unchecked. A "no"
+            # rides along with the other problems in the same rewrite.
+            if parsed and not send_checked and attempt < _COPY_ATTEMPTS:
+                send_checked = True
+                verdict, reason = send_check(parsed)
+                print(f"send check for '{category}': {verdict} ({reason})", file=sys.stderr)
+                if verdict is False:
+                    problems = list(problems) + ["קורא שלא מכיר את העמוד אמר שלא היה שולח את הפוסט "
+                                f"לחבר: {reason or 'כללי מדי'}. שמור על כל הכללים, "
+                                "אבל תן לו את העובדה, המספר או הטריק הספציפי "
+                                "שבגללם שווה להראות אותו למישהו"]
             if parsed and not problems:
                 return parsed, prompt
             # Item 99: an answer with a number the source never had is not a
