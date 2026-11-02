@@ -36,6 +36,7 @@ from datetime import datetime, timedelta, timezone
 from html import escape, unescape
 
 import copy_check
+import story
 from card_check import is_valid_card
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -1228,6 +1229,8 @@ def build_slot(slot_dir: pathlib.Path, category, copy, news=None,
     (slot_dir / "source.json").write_text(
         json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8",
     )
+    # Item 80: the Story that points at this post. Never raises.
+    story.write_story(slot_dir)
     return record
 
 
@@ -1258,6 +1261,7 @@ def rebuild_slot(slot_dir: pathlib.Path):
     (slot_dir / "caption.txt").write_text(
         make_caption(category, copy, slot_time_from_name(slot_dir.name)),
         encoding="utf-8")
+    story.write_story(slot_dir)
     print(f"Rebuilt {slot_dir.name} [{category}]: {len(SLIDE_PLAN)} slides")
 
 
