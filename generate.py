@@ -1060,6 +1060,22 @@ _CARD_CSS = """
   .dots { display:flex; gap:12px; align-items:center; direction:ltr; }
   .dots span { width:12px; height:12px; border-radius:6px; background:rgba(255,255,255,0.28); }
   .dots span.on { width:48px; background:#f6f4fb; }
+  /* Item 54 (template B, 3.11.2026, ported from the stock account): every
+     other evening carousel that is not already the Wednesday question test
+     opens on a different first card, so the grid stops looking like one image
+     repeated. No pill row: the category is set large in amber, the hook sits
+     low behind an amber rule, and a warm glow replaces the cool gradient.
+     Same fonts and the same dark ground, so the corner check still holds. */
+  body.tb {
+    background:
+      radial-gradient(circle at 80% 18%, rgba(251,191,36,0.20) 0%, rgba(251,191,36,0) 42%),
+      linear-gradient(170deg, #12091f 0%, #1c0d31 60%, #261245 100%);
+  }
+  body.tb .body { justify-content:flex-end; }
+  .tb-kicker { font-size:112px; font-weight:900; line-height:1.05; color:#fbbf24; }
+  .tb-rule { width:150px; height:9px; border-radius:5px; background:#fbbf24; margin:46px 0 38px; }
+  body.tb .headline { line-height:1.35; }
+  body.tb .source { border-right-color:rgba(251,191,36,0.45); }
   /* A Latin fragment inside a Hebrew sentence keeps its own direction. */
   .ltr { direction:ltr; unicode-bidi:isolate; display:inline-block; }
 """
@@ -1073,14 +1089,14 @@ def _dots(position, total):
     ) + "</div>"
 
 
-def _card_shell(top_row_html, body_html, dots_html=""):
+def _card_shell(top_row_html, body_html, dots_html="", body_class=""):
     return f"""<!DOCTYPE html>
 <html lang="he" dir="rtl">
 <head>
 <meta charset="UTF-8">
 <style>{_CARD_CSS}</style>
 </head>
-<body>
+<body class="{body_class}">
   {top_row_html}
   {body_html}
   <div class="footer">
@@ -1124,10 +1140,36 @@ _EXPLAIN_STEPS = [(120, 46), (180, 42), (240, 38), (310, 34), (430, 30)]
 _TAKEAWAY_STEPS = [(60, 52), (90, 46), (130, 40)]
 
 
-def render_slide_html(kind, position, total, category, copy):
+def wants_template_b(slot):
+    """Item 54: every other evening slot, never on the Wednesday question test,
+    so no running experiment shares its first card with this one."""
+    return (slot is not None and slot.hour >= 15 and not wants_question_hook(slot)
+            and slot.toordinal() % 2 == 1)
+
+
+def slot_variant(slot):
+    if wants_question_hook(slot):
+        return "question-hook"
+    if wants_template_b(slot):
+        return "template-b"
+    return None
+
+
+def render_slide_html(kind, position, total, category, copy, template_b=False):
     """One carousel slide. Three slides, each carrying something the others don't:
     the hook, the actual explanation, and the thing to do with it."""
     meta = CATEGORY_META[category]
+    if kind == "hook" and template_b:
+        body = (
+            f'<div class="tb-kicker">{escape(meta["tag"])}</div>'
+            '<div class="tb-rule"></div>'
+            f'<div class="headline" style="font-size:{_fit(copy["hook"], _HOOK_STEPS)}px;">'
+            f'{escape(copy["hook"])}</div>'
+            f'<div class="source">{escape(copy["headline"])}</div>'
+            f'<div class="swipe">החלק להמשך</div>'
+        )
+        return _card_shell("", f'<div class="body">{body}</div>',
+                           _dots(position, total), body_class="tb")
     top_row = (
         f'<div class="top-row"><div class="tag">{escape(meta["tag"])}</div>'
         f'<div class="slide-num ltr">{position}/{total}</div></div>'
@@ -1200,10 +1242,12 @@ def build_slot(slot_dir: pathlib.Path, category, copy, news=None,
                copy_prompt=None):
     slot_dir.mkdir(parents=True, exist_ok=True)
     slot = slot_time_from_name(slot_dir.name)
+    variant = slot_variant(slot)
     with tempfile.TemporaryDirectory() as tmp:
         tmp = pathlib.Path(tmp)
         for i, kind in enumerate(SLIDE_PLAN, start=1):
-            html = render_slide_html(kind, i, len(SLIDE_PLAN), category, copy)
+            html = render_slide_html(kind, i, len(SLIDE_PLAN), category, copy,
+                                     template_b=(variant == "template-b"))
             html_path = tmp / f"slide_{i}.html"
             html_path.write_text(html, encoding="utf-8")
             render_png(html_path, slot_dir / f"post_{i}.png")
@@ -1224,7 +1268,7 @@ def build_slot(slot_dir: pathlib.Path, category, copy, news=None,
         "backlog_items": BACKLOG_ITEMS,
         "copy_prompt": copy_prompt,
         "question_type": copy_check.question_type_for(slot),
-        "variant": "question-hook" if wants_question_hook(slot) else None,
+        "variant": variant,
     }
     (slot_dir / "source.json").write_text(
         json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8",
@@ -1249,11 +1293,21 @@ def rebuild_slot(slot_dir: pathlib.Path):
         raise RuntimeError(f"no source.json in {slot_dir}, nothing to rebuild from")
     data = json.loads(source.read_text(encoding="utf-8"))
     category, copy = data["category"], data["copy"]
+    # The variant is a function of the slot, so a queued post picks up a new
+    # template on rebuild. A variant some other code stamped is left alone.
+    variant = data.get("variant")
+    if variant in (None, "template-b"):
+        variant = slot_variant(slot_time_from_name(slot_dir.name))
+        if variant != data.get("variant"):
+            data["variant"] = variant
+            source.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                              encoding="utf-8")
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = pathlib.Path(tmp)
         for i, kind in enumerate(SLIDE_PLAN, start=1):
-            html = render_slide_html(kind, i, len(SLIDE_PLAN), category, copy)
+            html = render_slide_html(kind, i, len(SLIDE_PLAN), category, copy,
+                                     template_b=(variant == "template-b"))
             html_path = tmp / f"slide_{i}.html"
             html_path.write_text(html, encoding="utf-8")
             render_png(html_path, slot_dir / f"post_{i}.png")
