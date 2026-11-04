@@ -35,6 +35,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from html import escape, unescape
 
+import best_of
 import copy_check
 import story
 from card_check import is_valid_card
@@ -1278,6 +1279,27 @@ def build_slot(slot_dir: pathlib.Path, category, copy, news=None,
     return record
 
 
+def build_best_of(slot_dir: pathlib.Path, slot, picks):
+    """Item 97: last month's top takeaways, one per card. No model call."""
+    slot_dir.mkdir(parents=True, exist_ok=True)
+    record = best_of.record(slot, picks)
+    total = len(record["slides"])
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = pathlib.Path(tmp)
+        for i, kind in enumerate(record["slides"], start=1):
+            html = best_of.slide_html(kind, i, total, slot, picks,
+                                      _card_shell, _dots, _fit, escape)
+            html_path = tmp / f"slide_{i}.html"
+            html_path.write_text(html, encoding="utf-8")
+            render_png(html_path, slot_dir / f"post_{i}.png")
+    (slot_dir / "caption.txt").write_text(
+        best_of.caption(slot, picks, channel_cta(slot)), encoding="utf-8")
+    (slot_dir / "source.json").write_text(
+        json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
+    story.write_story(slot_dir)
+    return record
+
+
 def rebuild_slot(slot_dir: pathlib.Path):
     """Re-render a queued slot's cards from the copy already in source.json.
 
@@ -1292,6 +1314,10 @@ def rebuild_slot(slot_dir: pathlib.Path):
     if not source.is_file():
         raise RuntimeError(f"no source.json in {slot_dir}, nothing to rebuild from")
     data = json.loads(source.read_text(encoding="utf-8"))
+    if data.get("category") == "bestof":
+        build_best_of(slot_dir, slot_time_from_name(slot_dir.name), data["picks"])
+        print(f"Rebuilt {slot_dir.name} [bestof]: {len(data['picks']) + 1} slides")
+        return
     category, copy = data["category"], data["copy"]
     # The variant is a function of the slot, so a queued post picks up a new
     # template on rebuild. A variant some other code stamped is left alone.
@@ -1354,6 +1380,30 @@ def main():
     recent = recent_posts()
 
     for slot in slots:
+        name = slot.strftime("%Y-%m-%dT%H%M")
+        # Item 97: once a month an evening slot becomes the best-of, if last
+        # month has enough posts that actually reached people. It does not
+        # consume a place in the category cycle.
+        picks = best_of.pick(slot) if best_of.wants_best_of(slot) else []
+        if picks:
+            target = (pathlib.Path(tempfile.mkdtemp(prefix="ai-he-preview-")) / name
+                      if args.dry_run else SCHEDULED / name)
+            fresh = not target.exists()
+            try:
+                record = build_best_of(target, slot, picks)
+            except Exception as e:
+                print(f"FAILED {name} (bestof): {e}", file=sys.stderr)
+                if fresh and not args.dry_run:
+                    shutil.rmtree(target, ignore_errors=True)
+                failed += 1
+                continue
+            if args.dry_run:
+                print(f"[dry run] bestof rendered to {target}")
+                return 0
+            recent.insert(0, record)
+            print(f"queued {name} (bestof): {record['copy']['hook']}")
+            made += 1
+            continue
         category = CATEGORY_CYCLE[index % len(CATEGORY_CYCLE)]
         index += 1
         openings = recent_openings(recent)

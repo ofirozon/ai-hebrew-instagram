@@ -153,6 +153,12 @@ def alt_texts(slot_dir: pathlib.Path, count: int):
     try:
         data = json.loads((slot_dir / "source.json").read_text(encoding="utf-8"))
         copy = data.get("copy") or {}
+        if data.get("category") == "bestof":
+            # Item 97: the hook card, then one takeaway per card.
+            picks = data.get("picks") or []
+            texts = [copy.get("hook", "")] + [f"{p['concept']}: {p['takeaway']}" for p in picks]
+            return [_alt(f"כרטיס של בינה בקטנה. {t}") if i < len(texts) else None
+                    for i, t in zip(range(count), texts + [""] * count)]
         out = []
         for i in range(count):
             kind = ALT_PLAN[i] if i < len(ALT_PLAN) else None
